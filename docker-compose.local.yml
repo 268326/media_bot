@@ -1,0 +1,9 @@
+name: media_bot
+
+services:
+  media_bot:
+    image: ${MEDIA_BOT_IMAGE:-media_bot:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    pull_policy: never

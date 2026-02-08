@@ -1,0 +1,6 @@
+aiogram
+playwright
+python-dotenv
+nest_asyncio
+aiohttp
+apscheduler

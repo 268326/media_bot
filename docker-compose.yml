@@ -1,0 +1,26 @@
+name: media_bot
+
+services:
+  media_bot:
+    image: ${MEDIA_BOT_IMAGE:-media_bot:latest}
+    pull_policy: always
+    container_name: media_bot
+    restart: unless-stopped
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - HDHIVE_USER=${HDHIVE_USER}
+      - HDHIVE_PASS=${HDHIVE_PASS}
+      - HDHIVE_USER_ID=${HDHIVE_USER_ID:-}
+      - TMDB_API_KEY=${TMDB_API_KEY:-}
+      - ALLOWED_USER_ID=${ALLOWED_USER_ID:-0}
+      - TARGET_GROUP_ID=${TARGET_GROUP_ID:-0}
+      - AUTO_UNLOCK_THRESHOLD=${AUTO_UNLOCK_THRESHOLD:-0}
+      - SA_URL=${SA_URL:-}
+      - SA_PARENT_ID=${SA_PARENT_ID:-}
+      - SA_AUTO_ADD_DELAY=${SA_AUTO_ADD_DELAY:-60}
+      - CHECKIN_CRON=${CHECKIN_CRON:-}
+      - CHECKIN_TIMEZONE=${CHECKIN_TIMEZONE:-Asia/Shanghai}
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./auth.json:/app/auth.json
+    shm_size: '2gb'

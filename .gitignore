@@ -1,0 +1,13 @@
+.env
+auth.json
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+debug_*.png
+error_*.png
+.DS_Store
+
+# Optional local browser bundle
+chrome-headless-shell-linux64/
