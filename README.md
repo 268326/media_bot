@@ -33,10 +33,6 @@
 - `SA_PARENT_ID`
 - `SA_AUTO_ADD_DELAY`
 
-部署镜像可选：
-
-- `MEDIA_BOT_IMAGE`：Compose 使用的镜像地址（默认 `media_bot:latest`）
-
 ## 本地运行（Python）
 
 ```bash
@@ -47,10 +43,12 @@ playwright install chromium
 python main.py
 ```
 
-## Docker 运行（远程镜像模式）
+## Docker 运行（默认远程镜像）
 
-1. 设置 `.env` 中的 `MEDIA_BOT_IMAGE` 为你的远程镜像（例如 `ghcr.io/<owner>/<repo>:latest`）
-2. 启动：
+`docker-compose.yml` 默认使用：
+`ghcr.io/268326/media_bot:latest`
+
+启动：
 
 ```bash
 cd /path/to/media_bot
@@ -60,11 +58,16 @@ docker compose up -d
 
 ## Docker 本地构建调试模式
 
-使用 `docker-compose.local.yml` 覆盖为本地 build：
+编辑 `docker-compose.yml`，将：
+
+- `image: ghcr.io/268326/media_bot:latest` 注释掉
+- 取消注释 `build: .`
+
+然后启动：
 
 ```bash
 cd /path/to/media_bot
-docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+docker compose up -d --build
 ```
 
 查看日志：

@@ -2,24 +2,15 @@ name: media_bot
 
 services:
   media_bot:
-    image: ${MEDIA_BOT_IMAGE:-media_bot:latest}
-    pull_policy: always
+    # 生产：使用 GitHub Action 构建并推送的多架构镜像（amd64/arm64）
+    image: ghcr.io/268326/media_bot:latest
+    # 本地调试：改为使用本地构建（启用下面一行，并注释上面的 image）
+    # build: .
     container_name: media_bot
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      - BOT_TOKEN=${BOT_TOKEN}
-      - HDHIVE_USER=${HDHIVE_USER}
-      - HDHIVE_PASS=${HDHIVE_PASS}
-      - HDHIVE_USER_ID=${HDHIVE_USER_ID:-}
-      - TMDB_API_KEY=${TMDB_API_KEY:-}
-      - ALLOWED_USER_ID=${ALLOWED_USER_ID:-0}
-      - TARGET_GROUP_ID=${TARGET_GROUP_ID:-0}
-      - AUTO_UNLOCK_THRESHOLD=${AUTO_UNLOCK_THRESHOLD:-0}
-      - SA_URL=${SA_URL:-}
-      - SA_PARENT_ID=${SA_PARENT_ID:-}
-      - SA_AUTO_ADD_DELAY=${SA_AUTO_ADD_DELAY:-60}
-      - CHECKIN_CRON=${CHECKIN_CRON:-}
-      - CHECKIN_TIMEZONE=${CHECKIN_TIMEZONE:-Asia/Shanghai}
       - TZ=Asia/Shanghai
     volumes:
       - ./auth.json:/app/auth.json

@@ -60,8 +60,17 @@ nohup python main.py >/dev/null 2>&1 &
 
 ## 🐳 Docker 运行
 
+默认 `docker-compose.yml` 使用远程镜像 `ghcr.io/268326/media_bot:latest`。
+
 ```bash
 cd /path/to/media_bot
+docker compose pull
+docker compose up -d
+```
+
+本地调试构建时：编辑 `docker-compose.yml`，注释 `image` 并启用 `build: .`，再执行：
+
+```bash
 docker compose up -d --build
 ```
 
