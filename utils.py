@@ -124,3 +124,54 @@ def extract_user_id_from_link(href: str) -> str | None:
     if match:
         return match.group(1)
     return None
+
+
+def detect_share_provider(link: str) -> tuple[str, str]:
+    """
+    根据分享链接识别网盘提供方
+
+    Returns:
+        tuple[str, str]: (provider_key, provider_name)
+    """
+    host = (urlparse(link).netloc or "").lower()
+
+    if any(x in host for x in ("115.com", "115cdn.com", "anxia.com")):
+        return "115", "115网盘"
+    if "pan.baidu.com" in host:
+        return "baidu", "百度网盘"
+    if "cloud.189.cn" in host:
+        return "tianyi", "天翼云盘"
+    if "pan.xunlei.com" in host:
+        return "xunlei", "迅雷云盘"
+    if any(x in host for x in ("aliyundrive.com", "alipan.com")):
+        return "aliyun", "阿里云盘"
+    if "pan.quark.cn" in host:
+        return "quark", "夸克网盘"
+
+    return "unknown", "网盘"
+
+
+def is_115_share_link(link: str) -> bool:
+    provider_key, _ = detect_share_provider(link)
+    return provider_key == "115"
+
+
+def detect_provider_by_website(website: str | None) -> tuple[str, str]:
+    """
+    根据接口返回的 website 字段识别网盘
+    """
+    w = str(website or "").strip().lower()
+    mapping = {
+        "115": ("115", "115网盘"),
+        "baidu": ("baidu", "百度网盘"),
+        "bd": ("baidu", "百度网盘"),
+        "189": ("tianyi", "天翼云盘"),
+        "tianyi": ("tianyi", "天翼云盘"),
+        "xunlei": ("xunlei", "迅雷云盘"),
+        "aliyun": ("aliyun", "阿里云盘"),
+        "ali": ("aliyun", "阿里云盘"),
+        "quark": ("quark", "夸克网盘"),
+    }
+    if w in mapping:
+        return mapping[w]
+    return "unknown", "网盘"

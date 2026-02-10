@@ -11,3 +11,8 @@ error_*.png
 
 # Optional local browser bundle
 chrome-headless-shell-linux64/
+
+# Local captures / reverse-engineering artifacts (do not publish)
+1111/
+*.dump
+*.zip

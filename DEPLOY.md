@@ -1,13 +1,12 @@
 # 部署与维护指南
 
-本项目为 Media Bot（浏览器抓取方式），首次运行会自动登录并保存 Cookie 到 `auth.json`。
+本项目为 Media Bot（HTTP 接口方式），会自动登录并保存 token 到 `auth.json`。
 
 ## 📦 环境准备
 
 本地运行需要：
 - Python 3.11+
 - pip
-- Playwright（Chromium）
 
 Docker 运行可直接使用 `docker-compose.yml`。
 
@@ -36,6 +35,8 @@ CHECKIN_CRON=
 CHECKIN_TIMEZONE=Asia/Shanghai
 SA_URL=
 SA_PARENT_ID=
+SA_TOKEN=symedia
+SA_ENABLE_115_PUSH=1
 ```
 
 自动签到示例：
@@ -49,7 +50,6 @@ CHECKIN_TIMEZONE=Asia/Shanghai
 ```bash
 cd /path/to/media_bot
 pip install -r requirements.txt
-playwright install chromium
 python main.py
 ```
 
@@ -101,12 +101,9 @@ cat .env | grep -E "BOT_TOKEN|HDHIVE_USER|HDHIVE_PASS"
 rm -f auth.json
 ```
 
-### 3) Playwright 报错
+### 3) 登录失败或 token 刷新失败
 
-确认已安装浏览器：
-```bash
-playwright install chromium
-```
+检查 `.env` 的账号密码和 `HDHIVE_ACTION_LOGIN` 是否有效。
 
 ## 🔄 更新维护
 

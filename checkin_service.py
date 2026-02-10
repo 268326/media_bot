@@ -1,23 +1,39 @@
 """
-每日签到服务模块
-使用浏览器模拟点击用户菜单中的“每日签到”
+每日签到服务模块（HTTP接口版）
+使用 Next-Action 接口执行签到，不依赖浏览器点击。
 """
-import logging
+from __future__ import annotations
+
+import asyncio
+import json
+import os
 import re
+from typing import Any
 
-from playwright.async_api import async_playwright
+import requests
 
-from browser import get_browser_context, ensure_logged_in
-from config import BROWSER_TIMEOUT, SHORT_WAIT, MEDIUM_WAIT
+from config import (
+    CHECKIN_ACTION_ID,
+    CHECKIN_GAMBLE,
+    HDHIVE_BASE_URL,
+)
+from hdhive_auth import build_authenticated_session
+
+HOME_STATE_TREE = (
+    "%5B%22%22%2C%7B%22children%22%3A%5B%22(app)%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%2Ctrue%5D"
+)
+MOBILE_UA = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.7.3 Mobile/15E148 Safari/604.1"
+)
 
 
 def _extract_points_from_html(content: str) -> int | None:
-    """从页面内容中提取积分字段"""
     patterns = [
         r'\\"points\\":\s*(\d+)',
         r'"points"\s*:\s*(\d+)',
         r'"points"\s*:\s*"(\d+)"',
-        r'\\u0022points\\u0022\s*:\s*(\d+)',
+        r"\\u0022points\\u0022\s*:\s*(\d+)",
         r'points["\s]*:["\s]*(\d+)',
     ]
     for pattern in patterns:
@@ -27,118 +43,94 @@ def _extract_points_from_html(content: str) -> int | None:
     return None
 
 
-async def _read_points(page) -> int | None:
-    """读取当前页面中的积分数据"""
-    try:
-        html = await page.content()
-        return _extract_points_from_html(html)
-    except Exception:
-        return None
+def _read_points(s: requests.Session) -> int | None:
+    r = s.get(f"{HDHIVE_BASE_URL}/", headers={"accept": "text/html,*/*"}, timeout=30)
+    r.raise_for_status()
+    r.encoding = "utf-8"
+    return _extract_points_from_html(r.text)
+
+
+def _parse_rsc_payload(text: str) -> Any:
+    m = re.search(r"(?ms)^1:(.*?)(?=^\w+:|\Z)", text)
+    if m:
+        payload = m.group(1).strip()
+        try:
+            return json.loads(payload)
+        except json.JSONDecodeError:
+            return payload
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for line in lines:
+        if line.startswith("1:"):
+            payload = line[2:]
+            try:
+                return json.loads(payload)
+            except json.JSONDecodeError:
+                return payload
+    return None
+
+
+def _post_checkin(s: requests.Session) -> dict:
+    headers = {
+        "accept": "text/x-component",
+        "content-type": "text/plain;charset=UTF-8",
+        "origin": HDHIVE_BASE_URL,
+        "referer": f"{HDHIVE_BASE_URL}/",
+        "next-action": CHECKIN_ACTION_ID,
+        "next-router-state-tree": HOME_STATE_TREE,
+    }
+    payload = [bool(CHECKIN_GAMBLE)]
+    r = s.post(f"{HDHIVE_BASE_URL}/", headers=headers, data=json.dumps(payload), timeout=30)
+    r.raise_for_status()
+    r.encoding = "utf-8"
+    parsed = _parse_rsc_payload(r.text)
+
+    if isinstance(parsed, dict):
+        return parsed
+    return {"raw": str(parsed)}
+
+
+def _parse_checkin_result(data: dict) -> tuple[bool, bool, str]:
+    # 常见结构：{"error": {"success": false, "message": "...", "description": "..."}}
+    if isinstance(data.get("error"), dict):
+        err = data["error"]
+        success = bool(err.get("success"))
+        message = str(err.get("description") or err.get("message") or "签到失败")
+    else:
+        success = bool(data.get("success"))
+        message = str(data.get("description") or data.get("message") or "签到请求已发送")
+
+    already = ("已签到" in message) or ("明天再来" in message)
+    return success or already, already, message
+
+
+def _daily_check_in_sync() -> dict:
+    with build_authenticated_session() as s:
+        before_points = _read_points(s)
+        payload = _post_checkin(s)
+        success, already, message = _parse_checkin_result(payload)
+        after_points = _read_points(s)
+
+        return {
+            "success": success,
+            "already_checked_in": already,
+            "message": message,
+            "before_points": before_points,
+            "after_points": after_points,
+        }
 
 
 async def daily_check_in() -> dict:
     """
-    执行每日签到
-
-    Returns:
-        dict: {
-            "success": bool,
-            "already_checked_in": bool,
-            "message": str,
-            "before_points": int | None,
-            "after_points": int | None
-        }
+    执行每日签到（接口方式）
     """
-    async with async_playwright() as p:
-        browser, context = await get_browser_context(p)
-        page = await context.new_page()
-
-        try:
-            home_url = "https://hdhive.com/"
-            await page.goto(home_url, wait_until="domcontentloaded", timeout=BROWSER_TIMEOUT)
-            await ensure_logged_in(page, context, home_url)
-            await page.wait_for_timeout(MEDIUM_WAIT)
-
-            before_points = await _read_points(page)
-
-            # 打开用户菜单（你的 DOM 指向 user-menu-button）
-            menu_btn = page.locator("#user-menu-button")
-            if await menu_btn.count() == 0:
-                menu_btn = page.locator('button[aria-controls*="menu"], button[aria-haspopup="true"]')
-            if await menu_btn.count() == 0:
-                return {
-                    "success": False,
-                    "already_checked_in": False,
-                    "message": "未找到用户菜单按钮",
-                    "before_points": before_points,
-                    "after_points": None,
-                }
-
-            await menu_btn.first.click()
-            await page.wait_for_timeout(SHORT_WAIT)
-            await page.wait_for_selector('ul[role="menu"]', timeout=5000)
-
-            # 点击菜单中的“每日签到”
-            checkin_item = page.locator('ul[role="menu"] li[role="menuitem"]:has-text("每日签到")')
-            if await checkin_item.count() == 0:
-                checkin_item = page.locator('ul[role="menu"] li[role="menuitem"]:has-text("签到")')
-            if await checkin_item.count() == 0:
-                return {
-                    "success": False,
-                    "already_checked_in": False,
-                    "message": "未找到“每日签到”菜单项",
-                    "before_points": before_points,
-                    "after_points": None,
-                }
-
-            await checkin_item.first.click()
-            await page.wait_for_timeout(MEDIUM_WAIT)
-
-            # 读取提示文本（Snackbar/Alert）
-            hint_text = ""
-            alert = page.locator('[role="alert"]')
-            if await alert.count() > 0:
-                try:
-                    hint_text = (await alert.first.inner_text()).strip()
-                except Exception:
-                    hint_text = ""
-
-            if not hint_text:
-                # fallback: 从页面中抓取关键词
-                body_text = await page.locator("body").inner_text()
-                if "今日已签到" in body_text:
-                    hint_text = "今日已签到"
-                elif "签到成功" in body_text:
-                    hint_text = "签到成功"
-
-            after_points = await _read_points(page)
-
-            already = ("已签到" in hint_text) if hint_text else False
-            success = already or ("签到成功" in hint_text) or (after_points is not None and before_points is not None and after_points >= before_points)
-
-            if not hint_text:
-                hint_text = "签到请求已发送"
-
-            return {
-                "success": success,
-                "already_checked_in": already,
-                "message": hint_text,
-                "before_points": before_points,
-                "after_points": after_points,
-            }
-
-        except Exception as e:
-            logging.error(f"❌ 每日签到失败: {e}")
-            try:
-                await page.screenshot(path="error_daily_checkin.png")
-            except Exception:
-                pass
-            return {
-                "success": False,
-                "already_checked_in": False,
-                "message": str(e),
-                "before_points": None,
-                "after_points": None,
-            }
-        finally:
-            await browser.close()
+    try:
+        return await asyncio.to_thread(_daily_check_in_sync)
+    except Exception as e:
+        return {
+            "success": False,
+            "already_checked_in": False,
+            "message": str(e),
+            "before_points": None,
+            "after_points": None,
+        }

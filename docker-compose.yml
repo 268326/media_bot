@@ -2,9 +2,9 @@ name: media_bot
 
 services:
   media_bot:
-    # 生产：使用 GitHub Action 构建并推送的多架构镜像（amd64/arm64）
+    # 默认使用 GitHub Actions 发布的远程镜像
     image: ghcr.io/268326/media_bot:latest
-    # 本地调试：改为使用本地构建（启用下面一行，并注释上面的 image）
+    # 本地联调时可切换为本地构建
     # build: .
     container_name: media_bot
     restart: unless-stopped
@@ -15,3 +15,8 @@ services:
     volumes:
       - ./auth.json:/app/auth.json
     shm_size: '2gb'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

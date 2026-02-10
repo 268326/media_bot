@@ -8,6 +8,7 @@ import asyncio
 import aiohttp
 import html
 import os
+import time
 from aiogram import types, Router, F
 from aiogram.filters import Command
 from aiogram.types import (
@@ -18,11 +19,20 @@ from aiogram.types import (
     BufferedInputFile,
 )
 
-from config import ALLOWED_USER_ID, SA_URL, SA_PARENT_ID, SA_AUTO_ADD_DELAY, AUTO_UNLOCK_THRESHOLD, LOG_PATH
+from config import (
+    ALLOWED_USER_ID,
+    SA_URL,
+    SA_PARENT_ID,
+    SA_AUTO_ADD_DELAY,
+    SA_TOKEN,
+    SA_ENABLE_115_PUSH,
+    AUTO_UNLOCK_THRESHOLD,
+    LOG_PATH,
+)
 from danmu_service import fetch_bilibili_danmaku_xml, DanmuError
 from checkin_service import daily_check_in
-from utils import parse_hdhive_link
-from hdhive_scraper import (
+from utils import parse_hdhive_link, detect_share_provider, is_115_share_link, detect_provider_by_website
+from hdhive_client import (
     search_resources, 
     get_resources_by_tmdb_id,
     fetch_download_link, 
@@ -47,6 +57,10 @@ router = Router()
 
 # 待添加到SA的任务字典 {message_id: {"link": str, "task": asyncio.Task, "cancelled": bool}}
 pending_sa_tasks = {}
+# 资源网盘类型缓存：resource_id -> website
+resource_website_cache: dict[str, str] = {}
+# 资源列表状态缓存：message_id -> {"resources": list, "media_type": str, "title": str|None}
+resource_list_state: dict[int, dict] = {}
 
 
 async def notify_auto_unlock_failed(target_msg: Message, fallback_msg: Message):
@@ -57,7 +71,13 @@ async def notify_auto_unlock_failed(target_msg: Message, fallback_msg: Message):
         await fallback_msg.reply("❌ 自动解锁失败，请稍后重试", parse_mode="HTML")
 
 
-async def handle_link_extracted(wait_msg: Message, link: str, code: str = "无", auto_unlock: bool = False):
+async def handle_link_extracted(
+    wait_msg: Message,
+    link: str,
+    code: str = "无",
+    auto_unlock: bool = False,
+    website: str | None = None,
+):
     """
     统一处理链接提取成功后的逻辑
     
@@ -67,13 +87,20 @@ async def handle_link_extracted(wait_msg: Message, link: str, code: str = "无",
         code: 提取码
         auto_unlock: 是否是自动解锁
     """
-    # 如果配置了SA，启动自动添加倒计时
-    if SA_URL and SA_PARENT_ID:
+    provider_key, provider_name = detect_provider_by_website(website)
+    if provider_key == "unknown":
+        provider_key, provider_name = detect_share_provider(link)
+    button_text = f"🔗 打开{provider_name}"
+
+    # 仅 115 链接支持自动添加到 SA
+    can_auto_add_sa = SA_URL and SA_PARENT_ID and SA_ENABLE_115_PUSH and provider_key == "115"
+
+    if can_auto_add_sa:
         message_id = wait_msg.message_id
         
-        # 只显示115链接按钮
+        # 显示网盘链接按钮
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔗 打开115网盘", url=link)]
+            [InlineKeyboardButton(text=button_text, url=link)]
         ])
         
         unlock_text = "🤖 自动解锁 · " if auto_unlock else ""
@@ -82,11 +109,11 @@ async def handle_link_extracted(wait_msg: Message, link: str, code: str = "无",
         await wait_msg.edit_text(
             f"✅ <b>{unlock_text}提取成功</b>\n\n"
             f"<blockquote>\n"
-            f"🔗 <a href='{link}'>115网盘链接</a>\n"
+            f"🔗 <a href='{link}'>{provider_name}链接</a>\n"
             f"🔑 提取码: <code>{code}</code>\n"
             f"</blockquote>\n\n"
             f"⏱️ 将在 {SA_AUTO_ADD_DELAY} 秒后自动添加到 Symedia\n"
-            f"💡 不需要的话发送 /hdc 取消",
+            f"💡 不需要的话发送 /hdc 取消（仅115支持自动添加）",
             reply_markup=kb,
             parse_mode="HTML",
             disable_web_page_preview=True
@@ -102,19 +129,25 @@ async def handle_link_extracted(wait_msg: Message, link: str, code: str = "无",
         
         logging.info(f"⏰ 已启动自动添加倒计时: {link}")
     else:
-        # 未配置SA，只显示链接
+        # 非115或未配置SA：只显示链接，不自动添加
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔗 打开115网盘", url=link)]
+            [InlineKeyboardButton(text=button_text, url=link)]
         ])
         
         unlock_text = "🤖 自动解锁 · " if auto_unlock else ""
+        extra_tip = ""
+        if SA_URL and SA_PARENT_ID and provider_key != "115":
+            extra_tip = "\n\n💡 当前为非115链接，已跳过 Symedia 自动添加"
+        elif SA_URL and SA_PARENT_ID and provider_key == "115" and not SA_ENABLE_115_PUSH:
+            extra_tip = "\n\n💡 已关闭115自动推送到 Symedia（SA_ENABLE_115_PUSH=0）"
         
         await wait_msg.edit_text(
             f"✅ <b>{unlock_text}提取成功</b>\n\n"
             f"<blockquote>\n"
-            f"🔗 <a href='{link}'>115网盘链接</a>\n"
+            f"🔗 <a href='{link}'>{provider_name}链接</a>\n"
             f"🔑 提取码: <code>{code}</code>\n"
-            f"</blockquote>",
+            f"</blockquote>"
+            f"{extra_tip}",
             reply_markup=kb,
             parse_mode="HTML",
             disable_web_page_preview=True
@@ -417,6 +450,7 @@ async def handle_resource_link(message: Message, resource_id: str, resource_url:
         keep_session=True,
         start_url=resource_url,
     )
+    website = (result or {}).get("website") or resource_website_cache.get(resource_id, "")
     
     if result and result.get("need_unlock"):
         # 需要解锁
@@ -441,7 +475,8 @@ async def handle_resource_link(message: Message, resource_id: str, resource_url:
                     wait_msg,
                     unlock_result["link"],
                     unlock_result.get("code", "无"),
-                    auto_unlock=True
+                    auto_unlock=True,
+                    website=unlock_result.get("website") or website,
                 )
             else:
                 await notify_auto_unlock_failed(wait_msg, message)
@@ -488,7 +523,8 @@ async def handle_resource_link(message: Message, resource_id: str, resource_url:
             wait_msg,
             result["link"],
             result.get("code", "无"),
-            auto_unlock=False
+            auto_unlock=False,
+            website=result.get("website") or website,
         )
         return
     else:
@@ -526,8 +562,19 @@ async def handle_tmdb_link(message: Message, tmdb_id: str, media_type: str):
         return
     
     # 格式化并发送资源列表
-    text, kb = format_resource_list(resources, media_type)
+    for res in resources:
+        rid = str(res.get("id") or "")
+        website = str(res.get("website") or "")
+        if rid and website:
+            resource_website_cache[rid] = website
+
+    text, kb = format_resource_list(resources, media_type, provider_filter="115")
     await wait_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    resource_list_state[wait_msg.message_id] = {
+        "resources": resources,
+        "media_type": media_type,
+        "title": None,
+    }
 
 
 async def handle_keyword_search(message: Message, keyword: str, search_type: str):
@@ -544,13 +591,23 @@ async def handle_keyword_search(message: Message, keyword: str, search_type: str
     wait_msg = await message.reply(f"🔍 搜索中 · {keyword}", parse_mode="HTML")
     
     try:
+        start_ts = time.monotonic()
         tmdb_info = None
         resources = None
-        
-        # 优先尝试使用TMDB API
-        tmdb_result = await search_tmdb(keyword, media_type)
-        
-        if tmdb_result:
+
+        # 优先使用 HDHive 站内接口搜索（更快，且减少外部依赖）
+        resources = await search_resources(keyword, search_type)
+        if resources:
+            elapsed = int((time.monotonic() - start_ts) * 1000)
+            logging.info("✅ 站内搜索命中: keyword=%s type=%s cost_ms=%s", keyword, search_type, elapsed)
+        else:
+            # 站内未命中时，再尝试 TMDB API 兜底
+            tmdb_result = await search_tmdb(keyword, media_type)
+
+            if not tmdb_result:
+                await wait_msg.edit_text(format_error_message('no_results'), parse_mode="HTML")
+                return
+
             # 检查是否返回的是列表(多个结果)
             if isinstance(tmdb_result, list):
                 # 多个搜索结果，让用户选择
@@ -590,6 +647,8 @@ async def handle_keyword_search(message: Message, keyword: str, search_type: str
                 result_text += "<b>点击数字选择</b>"
                 
                 await message.reply(result_text, reply_markup=kb, parse_mode="HTML")
+                elapsed = int((time.monotonic() - start_ts) * 1000)
+                logging.info("✅ TMDB多结果返回: keyword=%s type=%s count=%s cost_ms=%s", keyword, search_type, len(tmdb_result), elapsed)
                 return
             else:
                 # 单个结果(完全匹配)
@@ -613,9 +672,6 @@ async def handle_keyword_search(message: Message, keyword: str, search_type: str
                 # 获取资源列表
                 logging.info(f"✅ TMDB匹配成功，获取资源: {title} (ID: {tmdb_id})")
                 resources = await get_resources_by_tmdb_id(tmdb_id, result_type)
-        else:
-            # 没有TMDB结果，使用网页搜索
-            resources = await search_resources(keyword, search_type)
         
         if not resources:
             error_msg = format_error_message('no_results')
@@ -624,15 +680,34 @@ async def handle_keyword_search(message: Message, keyword: str, search_type: str
             else:
                 await wait_msg.edit_text(error_msg, parse_mode="HTML")
             return
+
+        for res in resources:
+            rid = str(res.get("id") or "")
+            website = str(res.get("website") or "")
+            if rid and website:
+                resource_website_cache[rid] = website
         
         # 格式化资源列表
-        text, kb = format_resource_list(resources, media_type)
+        text, kb = format_resource_list(resources, media_type, provider_filter="115")
         
         # 发送资源列表
         if tmdb_info:
-            await message.reply(text, reply_markup=kb, parse_mode="HTML")
+            sent_msg = await message.reply(text, reply_markup=kb, parse_mode="HTML")
+            resource_list_state[sent_msg.message_id] = {
+                "resources": resources,
+                "media_type": media_type,
+                "title": None,
+            }
         else:
             await wait_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            resource_list_state[wait_msg.message_id] = {
+                "resources": resources,
+                "media_type": media_type,
+                "title": None,
+            }
+
+        elapsed = int((time.monotonic() - start_ts) * 1000)
+        logging.info("✅ 关键词搜索完成: keyword=%s type=%s resources=%s cost_ms=%s", keyword, search_type, len(resources), elapsed)
             
     except Exception as e:
         logging.error(f"❌ 搜索出错: {e}")
@@ -640,6 +715,28 @@ async def handle_keyword_search(message: Message, keyword: str, search_type: str
 
 
 # ==================== 回调查询处理器 ====================
+
+@router.callback_query(F.data.startswith("pf:"))
+async def callback_provider_filter(callback: CallbackQuery):
+    """切换资源网盘筛选（常驻按钮）"""
+    await callback.answer()
+    msg = callback.message
+    if not msg:
+        return
+
+    state = resource_list_state.get(msg.message_id)
+    if not state:
+        await callback.answer("列表已过期，请重新搜索", show_alert=True)
+        return
+
+    provider = (callback.data or "pf:115").split(":", 1)[1]
+    text, kb = format_resource_list(
+        state["resources"],
+        state["media_type"],
+        title=state.get("title"),
+        provider_filter=provider,
+    )
+    await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
 @router.callback_query(F.data.regexp(r"^(movie|tv)_\d+:"))
 async def callback_get_resource(callback: CallbackQuery):
@@ -669,6 +766,7 @@ async def callback_get_resource(callback: CallbackQuery):
         
         # 提取链接（使用会话管理）
         result = await fetch_download_link(resource_id, user_id=user_id, keep_session=True)
+        website = (result or {}).get("website") or resource_website_cache.get(resource_id, "")
         
         if result and result.get("need_unlock"):
             # 需要解锁
@@ -693,7 +791,8 @@ async def callback_get_resource(callback: CallbackQuery):
                         callback.message,
                         unlock_result["link"],
                         unlock_result.get("code", "无"),
-                        auto_unlock=True
+                        auto_unlock=True,
+                        website=unlock_result.get("website") or website,
                     )
                 else:
                     await notify_auto_unlock_failed(callback.message, callback.message)
@@ -738,7 +837,8 @@ async def callback_get_resource(callback: CallbackQuery):
             await handle_link_extracted(
                 callback.message,
                 result["link"],
-                result.get("code", "无")
+                result.get("code", "无"),
+                website=result.get("website") or website,
             )
             return
         else:
@@ -778,7 +878,8 @@ async def callback_unlock_resource(callback: CallbackQuery):
             await handle_link_extracted(
                 callback.message,
                 result["link"],
-                result.get("code", "无")
+                result.get("code", "无"),
+                website=result.get("website") or resource_website_cache.get(resource_id, ""),
             )
         else:
             await callback.message.edit_text(
@@ -821,6 +922,14 @@ async def auto_add_to_sa(message_id: int, link: str, original_message: Message, 
         countdown: 倒计时秒数（默认60秒）
     """
     try:
+        if not SA_ENABLE_115_PUSH:
+            logging.info("⏭️ 已禁用115推送到SA，跳过自动添加: %s", link)
+            return
+
+        if not is_115_share_link(link):
+            logging.info("⏭️ 跳过自动添加到SA（非115链接）: %s", link)
+            return
+
         # 等待倒计时（每10秒更新一次）
         step = 10 if countdown > 10 else max(1, countdown)
         for remaining in range(countdown, 0, -step):
@@ -854,7 +963,7 @@ async def auto_add_to_sa(message_id: int, link: str, original_message: Message, 
         logging.info(f"⏰ 倒计时结束，自动添加到SA: {link}")
         
         # 构建API URL
-        api_url = f"{SA_URL}/api/v1/plugin/cloud_helper/add_share_urls_115?token=symedia"
+        api_url = f"{SA_URL}/api/v1/plugin/cloud_helper/add_share_urls_115"
         
         # 构建请求体
         payload = {
@@ -864,7 +973,7 @@ async def auto_add_to_sa(message_id: int, link: str, original_message: Message, 
         
         # 发送POST请求
         async with aiohttp.ClientSession() as session:
-            async with session.post(api_url, json=payload) as response:
+            async with session.post(api_url, params={"token": SA_TOKEN}, json=payload) as response:
                 if response.status == 200:
                     data = await response.json()
                     message = data.get("message", "添加成功")
@@ -917,14 +1026,22 @@ async def callback_send_to_sa(callback: CallbackQuery):
     try:
         # 提取链接
         link = callback.data.replace("send_to_group:", "")
+
+        if not is_115_share_link(link):
+            await callback.answer("❌ 仅支持115链接添加到Symedia", show_alert=True)
+            return
         
         # 检查是否配置了SA
+        if not SA_ENABLE_115_PUSH:
+            await callback.answer("⚠️ 已禁用115推送到Symedia", show_alert=True)
+            return
+
         if not SA_URL or not SA_PARENT_ID:
             await callback.answer("❌ 未配置SA，无法添加到Symedia", show_alert=True)
             return
         
         # 构建API URL
-        api_url = f"{SA_URL}/api/v1/plugin/cloud_helper/add_share_urls_115?token=symedia"
+        api_url = f"{SA_URL}/api/v1/plugin/cloud_helper/add_share_urls_115"
         
         # 构建请求体
         payload = {
@@ -937,7 +1054,7 @@ async def callback_send_to_sa(callback: CallbackQuery):
         
         # 发送POST请求
         async with aiohttp.ClientSession() as session:
-            async with session.post(api_url, json=payload) as response:
+            async with session.post(api_url, params={"token": SA_TOKEN}, json=payload) as response:
                 if response.status == 200:
                     data = await response.json()
                     message = data.get("message", "添加成功")
@@ -1063,6 +1180,7 @@ async def handle_direct_link(message: Message):
             keep_session=True,
             start_url=resource_url,
         )
+        website = (result or {}).get("website") or resource_website_cache.get(resource_id, "")
         
         if result and result.get("need_unlock"):
             # 需要解锁
@@ -1088,7 +1206,8 @@ async def handle_direct_link(message: Message):
                         wait_msg,
                         unlock_result["link"],
                         unlock_result.get("code", "无"),
-                        auto_unlock=True
+                        auto_unlock=True,
+                        website=unlock_result.get("website") or website,
                     )
                 else:
                     await notify_auto_unlock_failed(wait_msg, message)
@@ -1150,9 +1269,13 @@ async def handle_direct_link(message: Message):
             code = result.get("code", "无")
             
             # 使用统一的处理函数
-            await handle_link_extracted(wait_msg, link, code, auto_unlock=False)
-            return
-            await wait_msg.edit_text(f"❌ 提取失败，请检查链接是否有效", parse_mode="HTML")
+            await handle_link_extracted(
+                wait_msg,
+                link,
+                code,
+                auto_unlock=False,
+                website=result.get("website") or website,
+            )
             return
         
         # 已处理资源链接，不再处理其他链接
@@ -1185,78 +1308,20 @@ async def handle_direct_link(message: Message):
             if not resources:
                 await wait_msg.edit_text(f"❌ 该{type_name}暂无资源", parse_mode="HTML")
                 return
+
+            for res in resources:
+                rid = str(res.get("id") or "")
+                website = str(res.get("website") or "")
+                if rid and website:
+                    resource_website_cache[rid] = website
             
-            # 构建按钮列表
-            kb = InlineKeyboardMarkup(inline_keyboard=[])
-            button_row = []
-            
-            for idx, res in enumerate(resources, 1):
-                btn = InlineKeyboardButton(
-                    text=f"{idx}",
-                    callback_data=f"{media_type}_{idx}:{res['id']}"
-                )
-                button_row.append(btn)
-                
-                if len(button_row) == 5 or idx == len(resources):
-                    kb.inline_keyboard.append(button_row)
-                    button_row = []
-            
-            # 构建资源列表文本
-            type_emoji = "🎬" if media_type == "movie" else "📺"
-            result_text = f"{type_emoji} <b>{type_name} · {len(resources)} 项资源</b>\n"
-            result_text += "─────────────────\n"
-            
-            for idx, res in enumerate(resources, 1):
-                result_text += f"\n<blockquote>\n<b>{idx}.</b> {res['title']}\n"
-                uploader = res.get('uploader', '未知用户')
-                points_status = res.get('points', '未知')
-                result_text += f"{uploader} · <code>{points_status}</code>\n"
-                
-                if res.get('tags'):
-                    quality_tags = []
-                    subtitle_tags = []
-                    format_tags = []
-                    encode_tags = []
-                    feature_tags = []
-                    size_tags = []
-                    
-                    for tag in res['tags']:
-                        if any(q in tag for q in ['4K', '1080', '2160', '720', 'HDR', 'DV', 'SDR']):
-                            quality_tags.append(tag)
-                        elif any(s in tag for s in ['简中', '繁中', '英', '双语', '中文']):
-                            subtitle_tags.append(tag)
-                        elif any(f in tag for f in ['蓝光原盘', 'BluRay', 'Blu-ray', 'ISO']):
-                            format_tags.append(tag)
-                        elif any(e in tag for e in ['REMUX', 'BDRip', 'WEB-DL', 'WEB', 'BluRayEncode']):
-                            encode_tags.append(tag)
-                        elif any(ft in tag for ft in ['内封', '外挂', '内嵌']):
-                            feature_tags.append(tag)
-                        elif any(size_char in tag for size_char in ['G', 'M', 'T']) and any(c.isdigit() for c in tag):
-                            size_tags.append(tag)
-                    
-                    tag_parts = []
-                    if quality_tags:
-                        tag_parts.append(" / ".join(quality_tags))
-                    if encode_tags:
-                        tag_parts.append(" / ".join(encode_tags))
-                    if format_tags:
-                        tag_parts.append(" / ".join(format_tags))
-                    if subtitle_tags:
-                        tag_parts.append(" / ".join(subtitle_tags))
-                    if feature_tags:
-                        tag_parts.append(" / ".join(feature_tags))
-                    if size_tags:
-                        tag_parts.append(" / ".join(size_tags))
-                    
-                    if tag_parts:
-                        result_text += " / ".join(tag_parts) + "\n"
-                
-                result_text += "</blockquote>"
-            
-            result_text += "\n─────────────────\n"
-            result_text += "<b>轻触数字获取链接</b>"
-            
-            await wait_msg.edit_text(result_text, reply_markup=kb, parse_mode="HTML")
+            text, kb = format_resource_list(resources, media_type, provider_filter="115")
+            await wait_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            resource_list_state[wait_msg.message_id] = {
+                "resources": resources,
+                "media_type": media_type,
+                "title": None,
+            }
             return
 
 
@@ -1325,88 +1390,30 @@ async def callback_select_tmdb(callback: CallbackQuery):
             else:
                 await callback.message.edit_text("❌ 未找到资源", parse_mode="HTML")
             return
+
+        for res in resources:
+            rid = str(res.get("id") or "")
+            website = str(res.get("website") or "")
+            if rid and website:
+                resource_website_cache[rid] = website
         
-        # 构建按钮列表
-        kb = InlineKeyboardMarkup(inline_keyboard=[])
-        
-        # 构建显示文本
-        type_emoji = "🎬" if media_type == "movie" else "📺"
-        type_name = "电影" if media_type == "movie" else "剧集"
-        result_text = f"{type_emoji} <b>{type_name} · {len(resources)} 项资源</b>\n"
-        result_text += "─────────────────\n"
-        
-        # 按钮横向排列
-        button_row = []
-        for idx, res in enumerate(resources, 1):
-            btn = InlineKeyboardButton(
-                text=f"{idx}",
-                callback_data=f"{media_type}_{idx}:{res['id']}"
-            )
-            button_row.append(btn)
-            
-            if len(button_row) == 5 or idx == len(resources):
-                kb.inline_keyboard.append(button_row)
-                button_row = []
-        
-        # 构建资源卡片内容
-        for idx, res in enumerate(resources, 1):
-            result_text += f"\n<blockquote>\n<b>{idx}.</b> {res['title']}\n"
-            
-            uploader = res.get('uploader', '未知用户')
-            points_status = res.get('points', '未知')
-            
-            result_text += f"{uploader} · <code>{points_status}</code>\n"
-            
-            if res.get('tags'):
-                quality_tags = []
-                subtitle_tags = []
-                format_tags = []
-                encode_tags = []
-                feature_tags = []
-                size_tags = []
-                
-                for tag in res['tags']:
-                    if any(q in tag for q in ['4K', '1080', '2160', '720', 'HDR', 'DV', 'SDR']):
-                        quality_tags.append(tag)
-                    elif any(s in tag for s in ['简中', '繁中', '英', '双语', '中文']):
-                        subtitle_tags.append(tag)
-                    elif any(f in tag for f in ['蓝光原盘', 'BluRay', 'Blu-ray', 'ISO']):
-                        format_tags.append(tag)
-                    elif any(e in tag for e in ['REMUX', 'BDRip', 'WEB-DL', 'WEB', 'BluRayEncode']):
-                        encode_tags.append(tag)
-                    elif any(ft in tag for ft in ['内封', '外挂', '内嵌']):
-                        feature_tags.append(tag)
-                    elif any(size_char in tag for size_char in ['G', 'M', 'T']) and any(c.isdigit() for c in tag):
-                        size_tags.append(tag)
-                
-                tag_parts = []
-                
-                if quality_tags:
-                    tag_parts.append(" / ".join(quality_tags))
-                if encode_tags:
-                    tag_parts.append(" / ".join(encode_tags))
-                if format_tags:
-                    tag_parts.append(" / ".join(format_tags))
-                if subtitle_tags:
-                    tag_parts.append(" / ".join(subtitle_tags))
-                if feature_tags:
-                    tag_parts.append(" / ".join(feature_tags))
-                if size_tags:
-                    tag_parts.append(" / ".join(size_tags))
-                
-                if tag_parts:
-                    result_text += " / ".join(tag_parts) + "\n"
-            
-            result_text += "</blockquote>"
-        
-        result_text += "\n─────────────────\n"
-        result_text += "<b>轻触数字获取链接</b>"
-        
+        text, kb = format_resource_list(resources, media_type, provider_filter="115")
+
         # 如果已经发送了TMDB信息，在新消息中显示资源列表
         if tmdb_info and tmdb_info.get("poster_url"):
-            await callback.message.answer(result_text, reply_markup=kb, parse_mode="HTML")
+            sent_msg = await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
+            resource_list_state[sent_msg.message_id] = {
+                "resources": resources,
+                "media_type": media_type,
+                "title": None,
+            }
         else:
-            await callback.message.edit_text(result_text, reply_markup=kb, parse_mode="HTML")
+            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            resource_list_state[callback.message.message_id] = {
+                "resources": resources,
+                "media_type": media_type,
+                "title": None,
+            }
         
     except Exception as e:
         logging.error(f"❌ 处理TMDB选择失败: {e}")

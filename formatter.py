@@ -6,6 +6,79 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from config import SA_URL, SA_PARENT_ID
 
 
+def _website_display(website: str | None) -> str:
+    key = _provider_key(website)
+    if key == "115":
+        return "115网盘"
+    if key == "189":
+        return "天翼云盘"
+    if key == "baidu":
+        return "百度网盘"
+    if key == "xunlei":
+        return "迅雷云盘"
+    if key == "aliyun":
+        return "阿里云盘"
+    if key == "quark":
+        return "夸克网盘"
+    raw = str(website or "").strip()
+    return f"{raw}网盘" if raw else "网盘"
+
+
+def _provider_key(website: str | None) -> str:
+    w = str(website or "").strip().lower()
+    if not w:
+        return "unknown"
+    if "115" in w:
+        return "115"
+    if w in ("189", "tianyi") or "189" in w:
+        return "189"
+    if "baidu" in w or w == "bd":
+        return "baidu"
+    if "xunlei" in w:
+        return "xunlei"
+    if "aliyun" in w or w == "ali" or "alipan" in w:
+        return "aliyun"
+    if "quark" in w:
+        return "quark"
+    return w
+
+
+def _filter_resources(resources: list, provider_filter: str) -> list:
+    if provider_filter == "all":
+        return resources
+    return [r for r in resources if _provider_key(r.get("website")) == provider_filter]
+
+
+def _build_provider_filter_buttons(resources: list, selected: str) -> list:
+    ordered = ["115", "189", "baidu", "xunlei", "aliyun", "quark", "all"]
+    labels = {
+        "115": "115",
+        "189": "天翼",
+        "baidu": "百度",
+        "xunlei": "迅雷",
+        "aliyun": "阿里",
+        "quark": "夸克",
+        "all": "全部",
+    }
+
+    available = set(_provider_key(r.get("website")) for r in resources)
+    keys = []
+    for k in ordered:
+        if k == "all" or k in available:
+            keys.append(k)
+
+    row = []
+    for k in keys:
+        prefix = "✅" if k == selected else ""
+        row.append(
+            InlineKeyboardButton(
+                text=f"{prefix}{labels[k]}",
+                callback_data=f"pf:{k}",
+            )
+        )
+    return [row] if row else []
+
+
 def classify_tags(tags: list) -> dict:
     """
     分类标签
@@ -79,7 +152,7 @@ def format_tags_inline(tags: list) -> str:
     return "\n" + " | ".join(tag_parts) if tag_parts else ""
 
 
-def build_resource_buttons(resources: list, media_type: str) -> InlineKeyboardMarkup:
+def build_resource_buttons(resources: list, media_type: str, provider_rows: list | None = None) -> InlineKeyboardMarkup:
     """
     构建资源选择按钮（横向排列）
     
@@ -90,7 +163,7 @@ def build_resource_buttons(resources: list, media_type: str) -> InlineKeyboardMa
     Returns:
         InlineKeyboardMarkup: 按钮键盘
     """
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
+    kb = InlineKeyboardMarkup(inline_keyboard=provider_rows or [])
     button_row = []
     
     for idx, res in enumerate(resources, 1):
@@ -108,7 +181,12 @@ def build_resource_buttons(resources: list, media_type: str) -> InlineKeyboardMa
     return kb
 
 
-def format_resource_list(resources: list, media_type: str, title: str = None) -> tuple[str, InlineKeyboardMarkup]:
+def format_resource_list(
+    resources: list,
+    media_type: str,
+    title: str = None,
+    provider_filter: str = "115",
+) -> tuple[str, InlineKeyboardMarkup]:
     """
     格式化资源列表为 Telegram 消息
     
@@ -123,34 +201,45 @@ def format_resource_list(resources: list, media_type: str, title: str = None) ->
     type_emoji = "🎬" if media_type == "movie" else "📺"
     type_name = "电影" if media_type == "movie" else "剧集"
     
+    display_resources = _filter_resources(resources, provider_filter)
+    used_filter = provider_filter
+
     if title:
         result_text = f"{type_emoji} <b>{title}</b>\n"
     else:
-        result_text = f"{type_emoji} <b>{type_name} · {len(resources)} 项资源</b>\n"
+        result_text = f"{type_emoji} <b>{type_name} · {len(display_resources)} 项资源</b>\n"
+
+    filter_name = "全部" if used_filter == "all" else _website_display(used_filter)
+    result_text += f"筛选: <code>{filter_name}</code>\n"
     
     result_text += "─────────────────\n"
     
     # 构建资源卡片
-    for idx, res in enumerate(resources, 1):
-        result_text += f"\n<blockquote>\n<b>{idx}.</b> {res['title']}\n"
-        
-        # 用户和积分信息
-        uploader = res.get('uploader', '未知用户')
-        points_status = res.get('points', '未知')
-        result_text += f"{uploader} · <code>{points_status}</code>\n"
-        
-        # 标签展示
-        if res.get('tags'):
-            tags_formatted = format_tags_inline(res['tags'])
-            result_text += tags_formatted
-        
-        result_text += "\n</blockquote>"
+    if not display_resources:
+        result_text += "\n<blockquote>当前筛选下暂无资源，点击下方按钮切换网盘</blockquote>\n"
+    else:
+        for idx, res in enumerate(display_resources, 1):
+            result_text += f"\n<blockquote>\n<b>{idx}.</b> {res['title']}\n"
+            
+            # 用户和积分信息
+            uploader = res.get('uploader', '未知用户')
+            points_status = res.get('points', '未知')
+            website = _website_display(res.get("website"))
+            result_text += f"{uploader} · {website} · <code>{points_status}</code>\n"
+            
+            # 标签展示
+            if res.get('tags'):
+                tags_formatted = format_tags_inline(res['tags'])
+                result_text += tags_formatted
+            
+            result_text += "\n</blockquote>"
     
     result_text += "\n─────────────────\n"
     result_text += "<b>轻触数字获取链接</b>"
     
     # 构建按钮
-    kb = build_resource_buttons(resources, media_type)
+    provider_rows = _build_provider_filter_buttons(resources, used_filter)
+    kb = build_resource_buttons(display_resources, media_type, provider_rows=provider_rows)
     
     return result_text, kb
 

@@ -54,7 +54,7 @@ async def main():
                 pass
         logging.info(f"✅ 启动时清除了 {len(debug_files)} 个调试图片")
     
-    # 创建Bot和Dispatcher实例（与原bot.py保持一致）
+    # 创建 Bot 和 Dispatcher 实例
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
 

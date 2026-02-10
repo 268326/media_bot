@@ -1,6 +1,6 @@
 # Media Bot
 
-一个基于 `aiogram + Playwright` 的 Telegram Bot，用于 HDHive 资源检索、链接提取、解锁、每日签到和定时自动签到。
+一个基于 `aiogram + HTTP 接口` 的 Telegram Bot，用于 HDHive 资源检索、链接提取、解锁、每日签到和定时自动签到。
 
 ## 功能
 
@@ -32,6 +32,8 @@
 - `SA_URL`
 - `SA_PARENT_ID`
 - `SA_AUTO_ADD_DELAY`
+- `SA_TOKEN`
+- `SA_ENABLE_115_PUSH`
 
 ## 本地运行（Python）
 
@@ -39,35 +41,15 @@
 cd /path/to/media_bot
 cp .env.example .env
 pip install -r requirements.txt
-playwright install chromium
 python main.py
 ```
 
 ## Docker 运行（默认远程镜像）
 
-`docker-compose.yml` 默认使用：
-`ghcr.io/268326/media_bot:latest`
-
-启动：
-
 ```bash
 cd /path/to/media_bot
 docker compose pull
 docker compose up -d
-```
-
-## Docker 本地构建调试模式
-
-编辑 `docker-compose.yml`，将：
-
-- `image: ghcr.io/268326/media_bot:latest` 注释掉
-- 取消注释 `build: .`
-
-然后启动：
-
-```bash
-cd /path/to/media_bot
-docker compose up -d --build
 ```
 
 查看日志：
@@ -102,3 +84,12 @@ CHECKIN_TIMEZONE=Asia/Shanghai
 ```
 
 签到失败会自动通知 `ALLOWED_USER_ID`。
+## Docker 本地构建调试（可选）
+
+如需本地联调，编辑 `docker-compose.yml`：
+- 注释 `image: ghcr.io/268326/media_bot:latest`
+- 取消注释 `build: .`
+
+```bash
+docker compose up -d --build
+```
