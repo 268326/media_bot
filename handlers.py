@@ -33,7 +33,6 @@ from danmu_service import fetch_bilibili_danmaku_xml, DanmuError
 from checkin_service import daily_check_in
 from utils import parse_hdhive_link, detect_share_provider, is_115_share_link, detect_provider_by_website
 from hdhive_client import (
-    search_resources, 
     get_resources_by_tmdb_id,
     fetch_download_link, 
     unlock_and_fetch,
@@ -61,6 +60,64 @@ pending_sa_tasks = {}
 resource_website_cache: dict[str, str] = {}
 # 资源列表状态缓存：message_id -> {"resources": list, "media_type": str, "title": str|None}
 resource_list_state: dict[int, dict] = {}
+# TMDB 候选列表状态缓存：message_id -> {"results": list[dict], "page": int}
+tmdb_search_state: dict[int, dict] = {}
+
+TMDB_PAGE_SIZE = 5
+
+
+def build_tmdb_candidate_message(results: list[dict], page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
+    """构建 TMDB 候选项分页消息。"""
+    total = len(results)
+    total_pages = max(1, (total + TMDB_PAGE_SIZE - 1) // TMDB_PAGE_SIZE)
+    current_page = min(max(page, 0), total_pages - 1)
+    start = current_page * TMDB_PAGE_SIZE
+    page_items = results[start:start + TMDB_PAGE_SIZE]
+
+    result_text = f"🔍 <b>找到 {total} 个匹配结果</b>\n"
+    result_text += f"第 <code>{current_page + 1}</code>/<code>{total_pages}</code> 页\n"
+    result_text += "─────────────────\n"
+    result_text += "请选择你要的是哪一个:\n"
+
+    button_row: list[InlineKeyboardButton] = []
+    for idx, item in enumerate(page_items, 1):
+        overview = item.get("overview", "暂无简介")
+        if len(overview) > 100:
+            overview = overview[:100] + "…"
+
+        display_index = start + idx
+        result_text += f"\n<blockquote>\n"
+        result_text += f"<b>{display_index}. {item['title']}</b>\n"
+        result_text += f"📅 {item.get('release_date', '未知')}"
+        if item.get("rating"):
+            result_text += f" · ⭐️ {item['rating']:.1f}\n"
+        else:
+            result_text += "\n"
+        result_text += f"{overview}\n"
+        result_text += f"</blockquote>"
+
+        button_row.append(
+            InlineKeyboardButton(
+                text=f"{idx}",
+                callback_data=f"select_tmdb:{start + idx - 1}",
+            )
+        )
+
+    inline_keyboard: list[list[InlineKeyboardButton]] = []
+    if button_row:
+        inline_keyboard.append(button_row)
+
+    nav_row: list[InlineKeyboardButton] = []
+    if current_page > 0:
+        nav_row.append(InlineKeyboardButton(text="⬅️ 上一页", callback_data=f"tmdb_page:{current_page - 1}"))
+    nav_row.append(InlineKeyboardButton(text=f"{current_page + 1}/{total_pages}", callback_data="tmdb_page:noop"))
+    if current_page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton(text="下一页 ➡️", callback_data=f"tmdb_page:{current_page + 1}"))
+    inline_keyboard.append(nav_row)
+
+    result_text += "\n─────────────────\n"
+    result_text += "<b>点击数字选择</b>"
+    return result_text, InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
 
 
 async def notify_auto_unlock_failed(target_msg: Message, fallback_msg: Message):
@@ -483,21 +540,8 @@ async def handle_resource_link(message: Message, resource_id: str, resource_url:
             return
 
         user_points = await get_user_points()
-        
-        if user_points is None:
-            # 积分查询失败，关闭会话
-            session_id = result.get("session_id")
-            if session_id:
-                await session_manager.close_session(session_id)
-            
-            await wait_msg.edit_text(
-                format_error_message('points_unavailable', 
-                    f"该资源需要 <code>{points}</code> 积分解锁"),
-                parse_mode="HTML"
-            )
-            return
-        
-        if user_points < points:
+
+        if user_points is not None and user_points < points:
             # 积分不足，关闭会话
             session_id = result.get("session_id")
             if session_id:
@@ -595,83 +639,48 @@ async def handle_keyword_search(message: Message, keyword: str, search_type: str
         tmdb_info = None
         resources = None
 
-        # 优先使用 HDHive 站内接口搜索（更快，且减少外部依赖）
-        resources = await search_resources(keyword, search_type)
-        if resources:
+        tmdb_result = await search_tmdb(keyword, media_type)
+
+        if not tmdb_result:
+            await wait_msg.edit_text(format_error_message('no_results'), parse_mode="HTML")
+            return
+
+        # 检查是否返回的是列表(多个结果)
+        if isinstance(tmdb_result, list):
+            # 多个搜索结果，让用户选择
+            await wait_msg.delete()
+
+            result_text, kb = build_tmdb_candidate_message(tmdb_result, page=0)
+            sent_msg = await message.reply(result_text, reply_markup=kb, parse_mode="HTML")
+            tmdb_search_state[sent_msg.message_id] = {
+                "results": tmdb_result,
+                "page": 0,
+            }
             elapsed = int((time.monotonic() - start_ts) * 1000)
-            logging.info("✅ 站内搜索命中: keyword=%s type=%s cost_ms=%s", keyword, search_type, elapsed)
-        else:
-            # 站内未命中时，再尝试 TMDB API 兜底
-            tmdb_result = await search_tmdb(keyword, media_type)
+            logging.info("✅ TMDB多结果返回: keyword=%s type=%s count=%s cost_ms=%s", keyword, search_type, len(tmdb_result), elapsed)
+            return
 
-            if not tmdb_result:
-                await wait_msg.edit_text(format_error_message('no_results'), parse_mode="HTML")
-                return
+        # 单个结果兼容路径：如果调用方未来传了 dict，这里仍可继续工作
+        tmdb_info = tmdb_result
+        tmdb_id = tmdb_result["tmdb_id"]
+        result_type = tmdb_result["media_type"]
+        title = tmdb_result["title"]
 
-            # 检查是否返回的是列表(多个结果)
-            if isinstance(tmdb_result, list):
-                # 多个搜索结果，让用户选择
-                await wait_msg.delete()
-                
-                result_text = f"🔍 <b>找到 {len(tmdb_result)} 个匹配结果</b>\n"
-                result_text += "─────────────────\n"
-                result_text += "请选择你要的是哪一个:\n"
-                
-                # 构建选择按钮
-                kb = InlineKeyboardMarkup(inline_keyboard=[])
-                
-                for idx, item in enumerate(tmdb_result, 1):
-                    # 显示每个结果的信息
-                    overview = item.get('overview', '暂无简介')
-                    if len(overview) > 100:
-                        overview = overview[:100] + "…"
-                    
-                    result_text += f"\n<blockquote>\n"
-                    result_text += f"<b>{idx}. {item['title']}</b>\n"
-                    result_text += f"📅 {item.get('release_date', '未知')}"
-                    if item.get('rating'):
-                        result_text += f" · ⭐️ {item['rating']:.1f}\n"
-                    else:
-                        result_text += "\n"
-                    result_text += f"{overview}\n"
-                    result_text += f"</blockquote>"
-                    
-                    # 添加选择按钮
-                    btn = InlineKeyboardButton(
-                        text=f"{idx}",
-                        callback_data=f"select_tmdb:{item['tmdb_id']}:{item['media_type']}"
-                    )
-                    kb.inline_keyboard.append([btn])
-                
-                result_text += "\n─────────────────\n"
-                result_text += "<b>点击数字选择</b>"
-                
-                await message.reply(result_text, reply_markup=kb, parse_mode="HTML")
-                elapsed = int((time.monotonic() - start_ts) * 1000)
-                logging.info("✅ TMDB多结果返回: keyword=%s type=%s count=%s cost_ms=%s", keyword, search_type, len(tmdb_result), elapsed)
-                return
-            else:
-                # 单个结果(完全匹配)
-                tmdb_info = tmdb_result
-                tmdb_id = tmdb_result["tmdb_id"]
-                result_type = tmdb_result["media_type"]
-                title = tmdb_result["title"]
-                
-                # 发送TMDB信息（图片+简介）
-                if tmdb_info.get("poster_url"):
-                    info_text = format_tmdb_info(tmdb_info)
-                    try:
-                        await message.reply_photo(
-                            photo=tmdb_info["poster_url"],
-                            caption=info_text,
-                            parse_mode="HTML"
-                        )
-                    except:
-                        await message.reply(info_text, parse_mode="HTML")
-                
-                # 获取资源列表
-                logging.info(f"✅ TMDB匹配成功，获取资源: {title} (ID: {tmdb_id})")
-                resources = await get_resources_by_tmdb_id(tmdb_id, result_type)
+        # 发送TMDB信息（图片+简介）
+        if tmdb_info.get("poster_url"):
+            info_text = format_tmdb_info(tmdb_info)
+            try:
+                await message.reply_photo(
+                    photo=tmdb_info["poster_url"],
+                    caption=info_text,
+                    parse_mode="HTML"
+                )
+            except Exception:
+                await message.reply(info_text, parse_mode="HTML")
+
+        # 获取资源列表
+        logging.info(f"✅ TMDB匹配成功，获取资源: {title} (ID: {tmdb_id})")
+        resources = await get_resources_by_tmdb_id(tmdb_id, result_type)
         
         if not resources:
             error_msg = format_error_message('no_results')
@@ -738,6 +747,36 @@ async def callback_provider_filter(callback: CallbackQuery):
     )
     await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
+
+@router.callback_query(F.data.startswith("tmdb_page:"))
+async def callback_tmdb_page(callback: CallbackQuery):
+    """切换 TMDB 候选列表分页。"""
+    msg = callback.message
+    if not msg:
+        await callback.answer()
+        return
+
+    state = tmdb_search_state.get(msg.message_id)
+    if not state:
+        await callback.answer("列表已过期，请重新搜索", show_alert=True)
+        return
+
+    action = (callback.data or "tmdb_page:noop").split(":", 1)[1]
+    if action == "noop":
+        await callback.answer()
+        return
+
+    try:
+        page = int(action)
+    except ValueError:
+        await callback.answer("页码无效", show_alert=True)
+        return
+
+    state["page"] = page
+    text, kb = build_tmdb_candidate_message(state["results"], page=page)
+    await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+
 @router.callback_query(F.data.regexp(r"^(movie|tv)_\d+:"))
 async def callback_get_resource(callback: CallbackQuery):
     """
@@ -799,21 +838,8 @@ async def callback_get_resource(callback: CallbackQuery):
                 return
             
             user_points = await get_user_points()
-            
-            if user_points is None:
-                # 积分查询失败，关闭会话
-                session_id = result.get("session_id")
-                if session_id:
-                    await session_manager.close_session(session_id)
-                
-                await callback.message.edit_text(
-                    format_error_message('points_unavailable',
-                        f"该资源需要 <code>{points}</code> 积分解锁"),
-                    parse_mode="HTML"
-                )
-                return
-            
-            if user_points < points:
+
+            if user_points is not None and user_points < points:
                 # 积分不足，关闭会话
                 session_id = result.get("session_id")
                 if session_id:
@@ -901,7 +927,7 @@ async def callback_cancel_unlock(callback: CallbackQuery):
     user_id = callback.from_user.id
     # 从消息中提取 resource_id
     import re
-    match = re.search(r'🆔\s*<code>([a-f0-9]+)</code>', callback.message.text or "")
+    match = re.search(r'🆔\s*<code>([a-f0-9-]+)</code>', callback.message.text or "")
     if match:
         resource_id = match.group(1)
         session_id = f"{user_id}:{resource_id}"
@@ -1156,7 +1182,7 @@ async def handle_direct_link(message: Message):
         user_id = message.from_user.id
         
         # 从URL中提取resource ID
-        resource_match = re.search(r'/resource/(?:115/)?([a-f0-9]+)', resource_url)
+        resource_match = re.search(r'/resource/(?:115/)?([a-f0-9-]+)', resource_url)
         if resource_match:
             resource_id = resource_match.group(1)
         else:
@@ -1214,21 +1240,8 @@ async def handle_direct_link(message: Message):
                 return
             
             user_points = await get_user_points()
-            
-            if user_points is None:
-                # 积分查询失败，关闭会话
-                session_id = result.get("session_id")
-                if session_id:
-                    await session_manager.close_session(session_id)
-                
-                await wait_msg.edit_text(
-                    f"❌ <b>无法获取积分信息</b>\n\n"
-                    f"该资源需要 <code>{points}</code> 积分解锁",
-                    parse_mode="HTML"
-                )
-                return
-            
-            if user_points < points:
+
+            if user_points is not None and user_points < points:
                 # 积分不足，关闭会话
                 session_id = result.get("session_id")
                 if session_id:
@@ -1244,23 +1257,8 @@ async def handle_direct_link(message: Message):
                 return
             
             # 询问是否解锁（会话保持打开）
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ 确定解锁", callback_data=f"unlock:{resource_id}"),
-                    InlineKeyboardButton(text="❌ 取消", callback_data="cancel_unlock")
-                ]
-            ])
-            
-            await wait_msg.edit_text(
-                f"🔓 <b>资源需要解锁</b>\n\n"
-                f"🆔 <code>{resource_id}</code>\n"
-                f"💰 需要积分: <code>{points}</code>\n"
-                f"💳 当前积分: <code>{user_points}</code>\n"
-                f"📊 解锁后剩余: <code>{user_points - points}</code>\n\n"
-                f"是否确定解锁?",
-                reply_markup=kb,
-                parse_mode="HTML"
-            )
+            text, kb = format_unlock_confirmation(resource_id, points, user_points)
+            await wait_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
             return
         
         elif result and result.get("link"):
@@ -1333,16 +1331,48 @@ async def callback_select_tmdb(callback: CallbackQuery):
     Callback data 格式: select_tmdb:tmdb_id:media_type
     """
     try:
-        # 解析数据: select_tmdb:12345:movie
-        parts = callback.data.split(":")
-        tmdb_id = parts[1]
-        media_type = parts[2]
+        msg = callback.message
+        if not msg:
+            await callback.answer()
+            return
+
+        tmdb_info = None
+        state = tmdb_search_state.get(msg.message_id)
+
+        if state:
+            parts = (callback.data or "").split(":")
+            if len(parts) != 2:
+                await callback.answer("数据格式错误", show_alert=True)
+                return
+            try:
+                selected_index = int(parts[1])
+            except ValueError:
+                await callback.answer("选择项无效", show_alert=True)
+                return
+
+            results = state.get("results") or []
+            if selected_index < 0 or selected_index >= len(results):
+                await callback.answer("列表已过期，请重新搜索", show_alert=True)
+                return
+
+            tmdb_info = results[selected_index]
+            tmdb_id = str(tmdb_info["tmdb_id"])
+            media_type = tmdb_info["media_type"]
+            tmdb_search_state.pop(msg.message_id, None)
+        else:
+            # 兼容旧格式: select_tmdb:12345:movie
+            parts = (callback.data or "").split(":")
+            if len(parts) != 3:
+                await callback.answer("列表已过期，请重新搜索", show_alert=True)
+                return
+            tmdb_id = parts[1]
+            media_type = parts[2]
         
         # 显示加载状态
         await callback.message.edit_text("⏳ 正在获取TMDB信息...", parse_mode="HTML")
         
         # 获取TMDB详细信息
-        tmdb_info = await get_tmdb_details(int(tmdb_id), media_type)
+        tmdb_info = await get_tmdb_details(int(tmdb_id), media_type) or tmdb_info
         
         if tmdb_info:
             # 构建TMDB信息文本

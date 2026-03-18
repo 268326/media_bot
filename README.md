@@ -1,6 +1,6 @@
 # Media Bot
 
-一个基于 `aiogram + HTTP 接口` 的 Telegram Bot，用于 HDHive 资源检索、链接提取、解锁、每日签到和定时自动签到。
+一个基于 `aiogram + HDHive Open API` 的 Telegram Bot，用于 HDHive 资源检索、链接提取、解锁、每日签到和定时自动签到。
 
 ## 功能
 
@@ -19,8 +19,7 @@
 必填：
 
 - `BOT_TOKEN`
-- `HDHIVE_USER`
-- `HDHIVE_PASS`
+- `HDHIVE_API_KEY`
 
 常用可选：
 
@@ -28,12 +27,17 @@
 - `AUTO_UNLOCK_THRESHOLD`
 - `CHECKIN_CRON`：5 段 cron，留空禁用自动签到
 - `CHECKIN_TIMEZONE`：默认 `Asia/Shanghai`
-- `TMDB_API_KEY`
+- `TMDB_API_KEY`：关键词搜索推荐必填
 - `SA_URL`
 - `SA_PARENT_ID`
 - `SA_AUTO_ADD_DELAY`
 - `SA_TOKEN`
 - `SA_ENABLE_115_PUSH`
+
+说明：
+
+- 关键词搜索依赖 TMDB API，因此 `/hdt` 和 `/hdm` 建议同时配置 `TMDB_API_KEY`
+- `/points`、`/checkin` 和自动签到依赖 HDHive Premium 权限对应的 Open API
 
 ## 本地运行（Python）
 

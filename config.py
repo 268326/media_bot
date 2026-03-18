@@ -13,27 +13,13 @@ load_dotenv()
 # Telegram Bot
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# HDHive 账号
-HDHIVE_USER = os.getenv("HDHIVE_USER")
-HDHIVE_PASS = os.getenv("HDHIVE_PASS")
-HDHIVE_USER_ID = os.getenv("HDHIVE_USER_ID", "")
-
-HDHIVE_TOKEN = os.getenv("HDHIVE_TOKEN", "").strip()
+# HDHive Open API
+HDHIVE_API_KEY = os.getenv("HDHIVE_API_KEY", "").strip()
 HDHIVE_BASE_URL = os.getenv("HDHIVE_BASE_URL", "https://hdhive.com").strip() or "https://hdhive.com"
-HDHIVE_ACTION_QUERY = os.getenv(
-    "HDHIVE_ACTION_QUERY",
-    "406a30f8054110881289ca1c583d02a21a307e070a",
-).strip()
-HDHIVE_ACTION_FINAL = os.getenv(
-    "HDHIVE_ACTION_FINAL",
-    "40d113051115da037257dc66c9c3d94f3d6848e150",
-).strip()
-HDHIVE_ACTION_LOGIN = os.getenv(
-    "HDHIVE_ACTION_LOGIN",
-    "600e7119a4ae58824a919da1e275646d4245b1ffd9",
-).strip()
-HDHIVE_LOGIN_TIMEOUT = int(os.getenv("HDHIVE_LOGIN_TIMEOUT", "45"))
-HDHIVE_LOGIN_RETRIES = int(os.getenv("HDHIVE_LOGIN_RETRIES", "2"))
+HDHIVE_OPEN_API_BASE_URL = (
+    os.getenv("HDHIVE_OPEN_API_BASE_URL", f"{HDHIVE_BASE_URL}/api/open").strip()
+    or f"{HDHIVE_BASE_URL}/api/open"
+)
 
 # TMDB API (可选)
 TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
@@ -48,7 +34,6 @@ AUTO_UNLOCK_THRESHOLD = int(os.getenv("AUTO_UNLOCK_THRESHOLD", "0"))  # 0=禁用
 # 自动签到配置
 CHECKIN_CRON = os.getenv("CHECKIN_CRON", "").strip()  # 5段cron表达式，留空则禁用
 CHECKIN_TIMEZONE = os.getenv("CHECKIN_TIMEZONE", "Asia/Shanghai").strip() or "Asia/Shanghai"
-CHECKIN_ACTION_ID = os.getenv("CHECKIN_ACTION_ID", "4085c9b55e34af7a29e9564a955be3ec5c410c577f").strip()
 CHECKIN_GAMBLE = os.getenv("CHECKIN_GAMBLE", "0").strip().lower() in ("1", "true", "yes", "on")
 
 # Symedia 集成 (可选)
@@ -57,9 +42,6 @@ SA_PARENT_ID = os.getenv("SA_PARENT_ID", "")
 SA_AUTO_ADD_DELAY = int(os.getenv("SA_AUTO_ADD_DELAY", "60"))
 SA_ENABLE_115_PUSH = os.getenv("SA_ENABLE_115_PUSH", "1").strip().lower() in ("1", "true", "yes", "on")
 SA_TOKEN = os.getenv("SA_TOKEN", "symedia").strip() or "symedia"
-
-# Cookie 文件路径
-COOKIE_FILE = "auth.json"
 
 # 日志文件路径（兼容旧变量 HDHIVE_LOG_PATH）
 LOG_PATH = os.getenv("MEDIA_BOT_LOG_PATH", os.getenv("HDHIVE_LOG_PATH", "media_bot.log"))
@@ -73,15 +55,8 @@ def validate_config():
     # 必需配置
     if not BOT_TOKEN:
         errors.append("未配置 BOT_TOKEN")
-    if not HDHIVE_USER:
-        errors.append("未配置 HDHIVE_USER")
-    if not HDHIVE_PASS:
-        errors.append("未配置 HDHIVE_PASS")
-
-    # HTTP 模式可从 .env 读取 token，也可回退读取 auth.json
-    has_auth_json = os.path.exists(COOKIE_FILE)
-    if not HDHIVE_TOKEN and not has_auth_json:
-        warnings.append("未配置 HDHIVE_TOKEN 且 auth.json 不存在，资源提取/解锁会失败。")
+    if not HDHIVE_API_KEY:
+        errors.append("未配置 HDHIVE_API_KEY")
     
     # 可选配置警告
     if ALLOWED_USER_ID == 0:
@@ -93,7 +68,7 @@ def validate_config():
         warnings.append("已禁用 SA_ENABLE_115_PUSH，115链接不会推送到Symedia。")
     
     if not TMDB_API_KEY:
-        warnings.append("未配置 TMDB_API_KEY，将无法使用TMDB API功能。")
+        warnings.append("未配置 TMDB_API_KEY，/hdt 和 /hdm 关键词搜索不可用，但直链解析仍可使用。")
     
     if AUTO_UNLOCK_THRESHOLD > 0:
         warnings.append(f"已启用自动解锁: {AUTO_UNLOCK_THRESHOLD} 积分及以下的资源将自动解锁。")

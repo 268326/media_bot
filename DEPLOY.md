@@ -1,6 +1,6 @@
 # 部署与维护指南
 
-本项目为 Media Bot（HTTP 接口方式），会自动登录并保存 token 到 `auth.json`。
+本项目为 Media Bot（HDHive Open API 方式），通过 `HDHIVE_API_KEY` 访问官方接口。
 
 ## 📦 环境准备
 
@@ -21,13 +21,11 @@ cp .env.example .env
 编辑 `.env`，填写必需项：
 ```env
 BOT_TOKEN=your_bot_token_here
-HDHIVE_USER=your_username
-HDHIVE_PASS=your_password
+HDHIVE_API_KEY=your_open_api_key_here
 ```
 
 可选项（按需填写）：
 ```env
-HDHIVE_USER_ID=
 TMDB_API_KEY=
 ALLOWED_USER_ID=0
 AUTO_UNLOCK_THRESHOLD=0
@@ -91,19 +89,14 @@ docker logs -f media_bot
 
 检查 `.env` 中必需项是否完整：
 ```bash
-cat .env | grep -E "BOT_TOKEN|HDHIVE_USER|HDHIVE_PASS"
+cat .env | grep -E "BOT_TOKEN|HDHIVE_API_KEY"
 ```
 
-### 2) 登录失败或 Cookie 失效
+### 2) API Key 无效或权限不足
 
-删除旧 Cookie，让程序重新登录：
-```bash
-rm -f auth.json
-```
+检查 `HDHIVE_API_KEY` 是否正确，且绑定了对应的 HDHive 用户。
 
-### 3) 登录失败或 token 刷新失败
-
-检查 `.env` 的账号密码和 `HDHIVE_ACTION_LOGIN` 是否有效。
+如果 `/points`、`/checkin` 或自动签到不可用，请确认该 API Key 关联的是 Premium 用户。
 
 ## 🔄 更新维护
 
@@ -113,9 +106,9 @@ rm -f auth.json
 - 本地：停止旧进程，重新运行 `python main.py`
 - Docker：`docker compose up -d --build`
 
-### 变更账号或密码
+### 变更 API Key
 
-更新 `.env` 后删除旧 `auth.json`，再重启程序。
+更新 `.env` 后重启程序。
 
 ### 自动解锁策略
 

@@ -10,6 +10,8 @@ def _website_display(website: str | None) -> str:
     key = _provider_key(website)
     if key == "115":
         return "115网盘"
+    if key == "123":
+        return "123网盘"
     if key == "189":
         return "天翼云盘"
     if key == "baidu":
@@ -30,6 +32,8 @@ def _provider_key(website: str | None) -> str:
         return "unknown"
     if "115" in w:
         return "115"
+    if "123" in w:
+        return "123"
     if w in ("189", "tianyi") or "189" in w:
         return "189"
     if "baidu" in w or w == "bd":
@@ -50,9 +54,10 @@ def _filter_resources(resources: list, provider_filter: str) -> list:
 
 
 def _build_provider_filter_buttons(resources: list, selected: str) -> list:
-    ordered = ["115", "189", "baidu", "xunlei", "aliyun", "quark", "all"]
+    ordered = ["115", "123", "189", "baidu", "xunlei", "aliyun", "quark", "all"]
     labels = {
         "115": "115",
+        "123": "123",
         "189": "天翼",
         "baidu": "百度",
         "xunlei": "迅雷",
@@ -61,7 +66,14 @@ def _build_provider_filter_buttons(resources: list, selected: str) -> list:
         "all": "全部",
     }
 
-    available = set(_provider_key(r.get("website")) for r in resources)
+    available = {
+        key
+        for key in (_provider_key(r.get("website")) for r in resources)
+        if key != "unknown"
+    }
+    if not available:
+        return []
+
     keys = []
     for k in ordered:
         if k == "all" or k in available:
@@ -201,8 +213,13 @@ def format_resource_list(
     type_emoji = "🎬" if media_type == "movie" else "📺"
     type_name = "电影" if media_type == "movie" else "剧集"
     
-    display_resources = _filter_resources(resources, provider_filter)
-    used_filter = provider_filter
+    available_filters = {
+        key
+        for key in (_provider_key(r.get("website")) for r in resources)
+        if key != "unknown"
+    }
+    used_filter = provider_filter if provider_filter == "all" or provider_filter in available_filters else "all"
+    display_resources = _filter_resources(resources, used_filter)
 
     if title:
         result_text = f"{type_emoji} <b>{title}</b>\n"
@@ -278,7 +295,7 @@ def format_download_link(link: str, code: str, resource_id: str = None) -> tuple
     return text, kb
 
 
-def format_unlock_confirmation(resource_id: str, points: int, user_points: int) -> tuple[str, InlineKeyboardMarkup]:
+def format_unlock_confirmation(resource_id: str, points: int, user_points: int | None) -> tuple[str, InlineKeyboardMarkup]:
     """
     格式化解锁确认消息
     
@@ -294,10 +311,19 @@ def format_unlock_confirmation(resource_id: str, points: int, user_points: int) 
         f"🔓 <b>资源需要解锁</b>\n\n"
         f"🆔 <code>{resource_id}</code>\n"
         f"💰 需要积分: <code>{points}</code>\n"
-        f"💳 当前积分: <code>{user_points}</code>\n"
-        f"📊 解锁后剩余: <code>{user_points - points}</code>\n\n"
-        f"是否确定解锁?"
     )
+
+    if user_points is None:
+        text += (
+            f"💳 当前积分: <code>未知</code>\n\n"
+            f"⚠️ 当前无法读取积分信息，确认后将直接尝试解锁。"
+        )
+    else:
+        text += (
+            f"💳 当前积分: <code>{user_points}</code>\n"
+            f"📊 解锁后剩余: <code>{user_points - points}</code>\n\n"
+            f"是否确定解锁?"
+        )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [

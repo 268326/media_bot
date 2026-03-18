@@ -139,6 +139,8 @@ def detect_share_provider(link: str) -> tuple[str, str]:
         return "115", "115网盘"
     if "pan.baidu.com" in host:
         return "baidu", "百度网盘"
+    if "123684.com" in host or "123865.com" in host or "123pan.com" in host:
+        return "123", "123网盘"
     if "cloud.189.cn" in host:
         return "tianyi", "天翼云盘"
     if "pan.xunlei.com" in host:
@@ -163,6 +165,7 @@ def detect_provider_by_website(website: str | None) -> tuple[str, str]:
     w = str(website or "").strip().lower()
     mapping = {
         "115": ("115", "115网盘"),
+        "123": ("123", "123网盘"),
         "baidu": ("baidu", "百度网盘"),
         "bd": ("baidu", "百度网盘"),
         "189": ("tianyi", "天翼云盘"),

@@ -1,5 +1,5 @@
 """
-HDHive API client facade (HTTP-only).
+HDHive API client facade (Open API).
 """
 import logging
 
@@ -12,4 +12,4 @@ from hdhive_http_api import (  # type: ignore
 )
 
 logger = logging.getLogger(__name__)
-logger.info("🧭 HDHive 后端: http")
+logger.info("🧭 HDHive 后端: open_api")

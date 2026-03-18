@@ -1,0 +1,46 @@
+通用响应格式
+所有 Open API 接口均采用统一的 JSON 响应结构。
+
+成功响应
+json
+{
+  "success": true,
+  "code": "200",
+  "message": "success",
+  "data": { "..." },
+  "meta": { "..." }
+}
+字段	类型	说明
+success	boolean	是否成功，固定为 true
+code	string	状态码，成功时为 "200"
+message	string	响应消息
+data	object / array	响应数据（可选）
+meta	object	元信息，如分页信息等（可选）
+错误响应
+json
+{
+  "success": false,
+  "code": "ERROR_CODE",
+  "message": "Error message",
+  "description": "详细错误描述"
+}
+字段	类型	说明
+success	boolean	是否成功，固定为 false
+code	string	错误码（见下方错误码汇总）
+message	string	错误消息（英文）
+description	string	详细描述（中文，可选）
+全局错误码汇总
+错误码	HTTP 状态码	说明
+400	400	请求参数错误
+401	401	未授权
+404	404	资源不存在
+500	500	服务器内部错误
+MISSING_API_KEY	401	缺少 API Key
+INVALID_API_KEY	401	API Key 无效
+DISABLED_API_KEY	401	API Key 已被禁用
+EXPIRED_API_KEY	401	API Key 已过期
+VIP_REQUIRED	403	非 Premium 用户，需升级为 Premium
+ENDPOINT_DISABLED	403	接口已被禁用
+ENDPOINT_QUOTA_EXCEEDED	429	接口配额已用尽
+RATE_LIMIT_EXCEEDED	429	请求频率过高
+INSUFFICIENT_POINTS	402	积分不足
