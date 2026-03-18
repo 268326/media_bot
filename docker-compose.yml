@@ -3,15 +3,15 @@ name: media_bot
 services:
   media_bot:
     # 本地联调使用本地构建镜像
-    build: .
+    #build: .
     # 如需切回远程镜像，可改回:
-    # image: ghcr.io/268326/media_bot:latest
+    image: ghcr.io/268326/media_bot:latest
     container_name: media_bot
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
       - TZ=Asia/Shanghai
+    volumes:
+      - ./.env:/app/.env:ro
     shm_size: '2gb'
     logging:
       driver: "json-file"

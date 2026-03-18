@@ -7,7 +7,8 @@ import sys
 from dotenv import load_dotenv
 
 # 加载环境变量
-load_dotenv()
+DOTENV_PATH = os.getenv("MEDIA_BOT_DOTENV_PATH", "/app/.env")
+load_dotenv(dotenv_path=DOTENV_PATH, override=True)
 
 # ==================== 环境变量配置 ====================
 # Telegram Bot
@@ -45,6 +46,16 @@ SA_TOKEN = os.getenv("SA_TOKEN", "symedia").strip() or "symedia"
 
 # 日志文件路径（兼容旧变量 HDHIVE_LOG_PATH）
 LOG_PATH = os.getenv("MEDIA_BOT_LOG_PATH", os.getenv("HDHIVE_LOG_PATH", "media_bot.log"))
+
+
+def mask_secret(value: str, *, prefix: int = 6) -> str:
+    """返回脱敏后的敏感信息，仅展示前几位用于排查配置。"""
+    text = str(value or "").strip()
+    if not text:
+        return "(empty)"
+    if len(text) <= prefix:
+        return text
+    return f"{text[:prefix]}..."
 
 # ==================== 配置验证 ====================
 def validate_config():

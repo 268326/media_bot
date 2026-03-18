@@ -29,7 +29,7 @@ nest_asyncio.apply()
 from aiogram import Bot, Dispatcher
 
 # 导入配置（这会自动验证配置）
-from config import BOT_TOKEN
+from config import BOT_TOKEN, DOTENV_PATH, HDHIVE_API_KEY, mask_secret
 
 # 导入处理器路由器
 from handlers import router
@@ -42,6 +42,7 @@ from checkin_scheduler import checkin_scheduler
 async def main():
     """主程序"""
     logging.info("🚀 Media Bot 启动中...")
+    logging.info("🧩 配置来源: dotenv=%s, HDHIVE_API_KEY=%s", DOTENV_PATH, mask_secret(HDHIVE_API_KEY))
     
     # 启动时清除所有调试图片
     debug_files = glob.glob("debug_*.png") + glob.glob("error_*.png")
