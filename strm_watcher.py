@@ -82,12 +82,14 @@ class Coordinator:
             self.inflight_paths.add(key)
             return True
 
-    def mark_finished(self, p: Path):
-        key = str(p)
+    def mark_finished(self, p: Path, alias_paths: list[Path] | None = None):
         now = time.time()
         with self.lock:
-            self.inflight_paths.discard(key)
-            self.recent_done[key] = now
+            self.inflight_paths.discard(str(p))
+            self.recent_done[str(p)] = now
+            for ap in alias_paths or []:
+                self.inflight_paths.discard(str(ap))
+                self.recent_done[str(ap)] = now
 
     def can_finalize(self, st: FolderState, now: float) -> bool:
         if st.active_jobs != 0:
@@ -227,7 +229,7 @@ class StrmWatcher:
         new_name = generate_new_name(p.name, info)
 
         if new_name == p.name:
-            logging.info("SKIP already_ok: %s", p)
+            logging.debug("SKIP already_ok: %s", p)
             return True, p
 
         dst = p.parent / new_name
@@ -269,7 +271,10 @@ class StrmWatcher:
                         logging.warning("MOVE_FAILED_STRM error: %s (%s)", final_path or p, exc)
                 return ok
             finally:
-                self.coord.mark_finished(p)
+                alias_paths = []
+                if final_path and final_path != p:
+                    alias_paths.append(final_path)
+                self.coord.mark_finished(p, alias_paths=alias_paths)
                 self.coord.job_finished(folder_key, ok=ok)
 
         self.executor.submit(_run)

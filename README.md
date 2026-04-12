@@ -37,6 +37,7 @@
 - `SA_AUTO_ADD_DELAY`
 - `SA_TOKEN`
 - `SA_ENABLE_115_PUSH`
+- `MEDIA_BOT_DEBUG`：是否输出调试日志（true/false）
 - `STRM_WATCH_ENABLED`：是否启用 STRM 监控
 - `STRM_WATCH_DIR` / `STRM_DONE_DIR` / `STRM_FAILED_DIR`
 - `STRM_FFPROBE_PATH`：默认 `/usr/local/bin/ffprobe`
@@ -45,6 +46,7 @@
 
 - 关键词搜索依赖 TMDB API，因此 `/hdt` 和 `/hdm` 建议同时配置 `TMDB_API_KEY`
 - `/points`、`/checkin` 和自动签到依赖 HDHive Premium 权限对应的 Open API
+- `MEDIA_BOT_DEBUG=true` 时会输出 DEBUG 日志，便于排查问题
 - STRM 监控依赖系统中的 `ffprobe` 和 `inotifywait`，Dockerfile 已自动安装
 
 ## STRM 监控说明

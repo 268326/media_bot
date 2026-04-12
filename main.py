@@ -10,11 +10,13 @@ import sys
 import nest_asyncio
 
 LOG_PATH = os.getenv("MEDIA_BOT_LOG_PATH", os.getenv("HDHIVE_LOG_PATH", "media_bot.log"))
+MEDIA_BOT_DEBUG = os.getenv("MEDIA_BOT_DEBUG", "false").strip().lower() in ("1", "true", "yes", "on")
+LOG_LEVEL = logging.DEBUG if MEDIA_BOT_DEBUG else logging.INFO
 
 # ==================== 首先配置日志 ====================
 # 必须在导入其他模块之前配置，因为其他模块可能会使用 logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=LOG_LEVEL,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
     handlers=[
