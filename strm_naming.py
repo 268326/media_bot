@@ -62,6 +62,12 @@ def build_wipe_regex(info: dict, has_source: bool) -> re.Pattern | None:
         alts.append(r"H\.?264|X\.?264|AVC|H\.?265|X\.?265|HEVC|AV1")
     if info.get("a_codec"):
         alts.append(r"TrueHD[\s.\-_]?Atmos|Dolby[\s.\-_]?Atmos|Atmos")
+        alts.append(r"DTS-HD[\s.\-_]?(?:MA|HRA)?[\s.\-_]?[1257]\.[01]")
+        alts.append(r"DTS[\s.\-_]?[1257]\.[01]")
+        alts.append(r"DDP[\s.\-_]?[1257]\.[01]|EAC3[\s.\-_]?[1257]\.[01]")
+        alts.append(r"DD\+[\s.\-_]?[1257]\.[01]|AC3[\s.\-_]?[1257]\.[01]|DD[\s.\-_]?[1257]\.[01]")
+        alts.append(r"TrueHD[\s.\-_]?[1257]\.[01]")
+        alts.append(r"AAC[\s.\-_]?[1257]\.[01]|FLAC[\s.\-_]?[1257]\.[01]|OPUS[\s.\-_]?[1257]\.[01]")
         alts.append(r"DTS-HD[\s.\-_]?(?:MA|HRA)?|DTS")
         alts.append(r"DDP|EAC3|DD\+|AC3|TrueHD|Dolby|AAC|FLAC|OPUS")
         alts.append(r"[1257]\.[01]")
