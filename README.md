@@ -1,6 +1,6 @@
 # Media Bot
 
-一个基于 `aiogram + HDHive Open API` 的 Telegram Bot，用于 HDHive 资源检索、链接提取、解锁、每日签到和定时自动签到。
+一个基于 `aiogram + HDHive Open API` 的 Telegram Bot，用于 HDHive 资源检索、链接提取、解锁、每日签到、定时自动签到，以及可选的 `.strm` 文件监控重命名归档。
 
 ## 功能
 
@@ -13,6 +13,9 @@
 - `CHECKIN_CRON` 定时自动签到
 - 自动签到失败时通知 `ALLOWED_USER_ID`
 - `/danmu` 下载 B 站弹幕 XML
+- `/strm_status` 查看 STRM 监控服务状态
+- `/strm_scan` 手动触发一次 STRM 存量重扫
+- 可选启用 STRM 监控：实时探测、重命名、失败归档、整目录移动到 DONE
 
 ## 环境变量
 
@@ -33,11 +36,34 @@
 - `SA_AUTO_ADD_DELAY`
 - `SA_TOKEN`
 - `SA_ENABLE_115_PUSH`
+- `STRM_WATCH_ENABLED`：是否启用 STRM 监控
+- `STRM_WATCH_DIR` / `STRM_DONE_DIR` / `STRM_FAILED_DIR`
+- `STRM_FFPROBE_PATH`：默认 `/usr/local/bin/ffprobe`
 
 说明：
 
 - 关键词搜索依赖 TMDB API，因此 `/hdt` 和 `/hdm` 建议同时配置 `TMDB_API_KEY`
 - `/points`、`/checkin` 和自动签到依赖 HDHive Premium 权限对应的 Open API
+- STRM 监控依赖系统中的 `ffprobe` 和 `inotifywait`，Dockerfile 已自动安装
+
+## STRM 监控说明
+
+启用后，后台会递归监控 `STRM_WATCH_DIR` 下的 `.strm` 文件：
+
+- 监听 `close_write/moved_to`
+- 读取 `.strm` 内 URL
+- 用 `ffprobe` 探测媒体信息
+- 清理旧技术标签并重命名
+- 失败文件移动到 `STRM_FAILED_DIR`（保留原目录层级）
+- 一级目录空闲且达到最小存活时间后，整体移动到 `STRM_DONE_DIR`
+
+已内置以下稳健性优化：
+
+- 同一路径去重，避免重复提交
+- 失败移动保留 `.strm` 扩展名
+- `inotifywait` 异常退出自动重启
+- 目录完成判定加入最小存活时间保护
+- 默认保留 `SDR` 标记
 
 ## 本地运行（Python）
 
@@ -88,6 +114,7 @@ CHECKIN_TIMEZONE=Asia/Shanghai
 ```
 
 签到失败会自动通知 `ALLOWED_USER_ID`。
+
 ## Docker 本地构建调试（可选）
 
 如需本地联调，编辑 `docker-compose.yml`：

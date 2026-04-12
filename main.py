@@ -37,6 +37,7 @@ from handlers import router
 # 导入会话管理器
 from session_manager import session_manager
 from checkin_scheduler import checkin_scheduler
+from strm_service import strm_service
 
 
 async def main():
@@ -63,6 +64,7 @@ async def main():
     await session_manager.start()
     logging.info("✅ 会话管理器已启动")
     await checkin_scheduler.start(bot)
+    await strm_service.start()
     
     # 注册路由器
     dp.include_router(router)
@@ -75,6 +77,9 @@ async def main():
     finally:
         # 停止自动签到调度
         await checkin_scheduler.stop()
+
+        # 停止 STRM 监控服务
+        await strm_service.stop()
 
         # 停止会话管理器
         await session_manager.stop()

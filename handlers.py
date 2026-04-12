@@ -50,9 +50,11 @@ from formatter import (
     format_help_message,
     format_start_message
 )
+from strm_handlers import router as strm_router
 
 # 创建路由器
 router = Router()
+router.include_router(strm_router)
 
 # 待添加到SA的任务字典 {message_id: {"link": str, "task": asyncio.Task, "cancelled": bool}}
 pending_sa_tasks = {}

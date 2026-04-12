@@ -6,6 +6,8 @@ import os
 import sys
 from dotenv import load_dotenv
 
+from strm_config import StrmSettings
+
 # 加载环境变量
 DOTENV_PATH = os.getenv("MEDIA_BOT_DOTENV_PATH", "/app/.env")
 load_dotenv(dotenv_path=DOTENV_PATH, override=True)
@@ -46,6 +48,41 @@ SA_TOKEN = os.getenv("SA_TOKEN", "symedia").strip() or "symedia"
 
 # 日志文件路径（兼容旧变量 HDHIVE_LOG_PATH）
 LOG_PATH = os.getenv("MEDIA_BOT_LOG_PATH", os.getenv("HDHIVE_LOG_PATH", "media_bot.log"))
+
+# STRM 监控配置
+STRM_WATCH_ENABLED = os.getenv("STRM_WATCH_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+STRM_FFPROBE_PATH = os.getenv("STRM_FFPROBE_PATH", "/usr/local/bin/ffprobe").strip() or "/usr/local/bin/ffprobe"
+STRM_WATCH_DIR = os.getenv("STRM_WATCH_DIR", "").strip()
+STRM_DONE_DIR = os.getenv("STRM_DONE_DIR", "").strip()
+STRM_FAILED_DIR = os.getenv("STRM_FAILED_DIR", "").strip()
+STRM_MAX_WORKERS = int(os.getenv("STRM_MAX_WORKERS", "3"))
+STRM_TIMEOUT_S = int(os.getenv("STRM_TIMEOUT_S", "60"))
+STRM_MAX_RETRIES = int(os.getenv("STRM_MAX_RETRIES", "2"))
+STRM_RW_TIMEOUT_US = int(os.getenv("STRM_RW_TIMEOUT_US", "15000000"))
+STRM_PROBESIZE = os.getenv("STRM_PROBESIZE", "12M").strip() or "12M"
+STRM_ANALYZEDURATION = os.getenv("STRM_ANALYZEDURATION", "3000000").strip() or "3000000"
+STRM_RECENT_EVENT_TTL = int(os.getenv("STRM_RECENT_EVENT_TTL", "10"))
+STRM_IDLE_SECONDS = int(os.getenv("STRM_IDLE_SECONDS", "30"))
+STRM_MIN_FOLDER_AGE_SECONDS = int(os.getenv("STRM_MIN_FOLDER_AGE_SECONDS", "60"))
+STRM_ONLY_FIRST_LEVEL_DIR = os.getenv("STRM_ONLY_FIRST_LEVEL_DIR", "1").strip().lower() in ("1", "true", "yes", "on")
+
+STRM_SETTINGS = StrmSettings(
+    enabled=STRM_WATCH_ENABLED,
+    ffprobe_path=STRM_FFPROBE_PATH,
+    watch_dir=STRM_WATCH_DIR,
+    done_dir=STRM_DONE_DIR,
+    failed_dir=STRM_FAILED_DIR,
+    max_workers=STRM_MAX_WORKERS,
+    timeout_s=STRM_TIMEOUT_S,
+    max_retries=STRM_MAX_RETRIES,
+    rw_timeout_us=STRM_RW_TIMEOUT_US,
+    probesize=STRM_PROBESIZE,
+    analyzeduration=STRM_ANALYZEDURATION,
+    recent_event_ttl=STRM_RECENT_EVENT_TTL,
+    idle_seconds=STRM_IDLE_SECONDS,
+    min_folder_age_seconds=STRM_MIN_FOLDER_AGE_SECONDS,
+    only_first_level_dir=STRM_ONLY_FIRST_LEVEL_DIR,
+)
 
 
 def mask_secret(value: str, *, prefix: int = 6) -> str:
@@ -88,6 +125,21 @@ def validate_config():
         warnings.append(
             f"已启用自动签到: cron={CHECKIN_CRON}, timezone={CHECKIN_TIMEZONE}, notify_chat_id={ALLOWED_USER_ID or '未配置'}"
         )
+
+    if STRM_WATCH_ENABLED:
+        missing = []
+        if not STRM_WATCH_DIR:
+            missing.append("STRM_WATCH_DIR")
+        if not STRM_DONE_DIR:
+            missing.append("STRM_DONE_DIR")
+        if not STRM_FAILED_DIR:
+            missing.append("STRM_FAILED_DIR")
+        if missing:
+            errors.append(f"已启用 STRM_WATCH_ENABLED，但缺少配置: {', '.join(missing)}")
+        else:
+            warnings.append(
+                f"已启用 STRM 监控: watch={STRM_WATCH_DIR}, done={STRM_DONE_DIR}, failed={STRM_FAILED_DIR}"
+            )
     
     # 输出错误和警告
     if errors:
