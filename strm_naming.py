@@ -34,7 +34,8 @@ def extract_source_tag(name_part: str) -> str:
 
 
 def extract_release_group(name_part: str) -> tuple[str, str]:
-    m = re.search(r"-(?P<grp>[A-Za-z0-9][A-Za-z0-9]{1,30})$", name_part)
+    # 支持复合发布组：-GROUP、-A@B、-A&B 等
+    m = re.search(r"-(?P<grp>[A-Za-z0-9][A-Za-z0-9@&]{1,60})$", name_part)
     if not m:
         return name_part, ""
     grp = m.group("grp")
