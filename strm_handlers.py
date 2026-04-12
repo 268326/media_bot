@@ -56,3 +56,14 @@ async def cmd_strm_scan(message: Message):
     result = await strm_service.scan()
     prefix = "✅" if result.get("ok") else "❌"
     await wait_msg.edit_text(f"{prefix} {result.get('message', '未知结果')}", parse_mode="HTML")
+
+
+@router.message(Command("strm_restart"))
+async def cmd_strm_restart(message: Message):
+    if not await check_user_permission(message):
+        return
+
+    wait_msg = await message.reply("♻️ 正在重启 STRM watcher…", parse_mode="HTML")
+    result = await strm_service.restart()
+    prefix = "✅" if result.get("ok") else "❌"
+    await wait_msg.edit_text(f"{prefix} {result.get('message', '未知结果')}", parse_mode="HTML")

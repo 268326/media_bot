@@ -46,9 +46,17 @@ class Coordinator:
             if len(rel.parts) < 2:
                 return None
             return rel.parts[0]
-        return rel.parts[0] if rel.parts else ""
 
-    def touch(self, folder_key: str):
+        # only_first_level_dir=0 时：
+        # - 根目录下直接出现的 .strm 允许处理，但不作为“可移动目录批次”纳入 finalize
+        # - 子目录中的 .strm 仍按一级目录批次归组
+        if len(rel.parts) < 2:
+            return None
+        return rel.parts[0]
+
+    def touch(self, folder_key: str | None):
+        if folder_key is None:
+            return
         with self.lock:
             st = self.folders.get(folder_key)
             if not st:
@@ -90,7 +98,9 @@ class Coordinator:
             return False
         return True
 
-    def job_started(self, folder_key: str):
+    def job_started(self, folder_key: str | None):
+        if folder_key is None:
+            return
         with self.lock:
             st = self.folders.get(folder_key)
             if not st:
@@ -99,7 +109,9 @@ class Coordinator:
             st.active_jobs += 1
             st.last_activity = time.time()
 
-    def job_finished(self, folder_key: str, ok: bool):
+    def job_finished(self, folder_key: str | None, ok: bool):
+        if folder_key is None:
+            return
         with self.lock:
             st = self.folders.get(folder_key)
             if not st:
@@ -182,14 +194,7 @@ class StrmWatcher:
         if not src.exists():
             return
         if not src.is_dir():
-            logging.warning("SKIP move_done_not_dir: %s", src)
-            return
-
-        # 二次确认：移动前再次扫描目录，若仍有 .strm 留存则暂不移动
-        remain = list(src.rglob("*.strm"))
-        if remain:
-            self.coord.touch(folder_key)
-            logging.info("DEFER_DONE_FOLDER remaining_strm=%s folder=%s", len(remain), src)
+            logging.debug("SKIP move_done_not_dir: %s", src)
             return
 
         dst = self.done_dir / folder_key
@@ -230,7 +235,7 @@ class StrmWatcher:
             logging.warning("FAIL rename_error: %s (%s)", p, exc)
             return False
 
-    def submit_one(self, p: Path, folder_key: str):
+    def submit_one(self, p: Path, folder_key: str | None):
         if not self.executor:
             raise RuntimeError("executor not started")
         if not self.coord.mark_submitted(p):
@@ -258,8 +263,6 @@ class StrmWatcher:
     def scan_existing_and_submit(self):
         for p in self.watch_dir.rglob("*.strm"):
             folder_key = self.coord.folder_key_for(p)
-            if folder_key is None:
-                continue
             self.coord.touch(folder_key)
             self.submit_one(p, folder_key)
 
@@ -313,9 +316,6 @@ class StrmWatcher:
 
             fp = Path(path_s)
             folder_key = self.coord.folder_key_for(fp)
-            if folder_key is None:
-                continue
-
             self.coord.touch(folder_key)
             self.submit_one(fp, folder_key)
 

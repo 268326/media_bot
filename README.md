@@ -15,6 +15,7 @@
 - `/danmu` 下载 B 站弹幕 XML
 - `/strm_status` 查看 STRM 监控服务状态
 - `/strm_scan` 手动触发一次 STRM 存量重扫
+- `/strm_restart` 手动重启 STRM watcher
 - 可选启用 STRM 监控：实时探测、重命名、失败归档、整目录移动到 DONE
 
 ## 环境变量
@@ -63,7 +64,7 @@
 - 失败移动保留 `.strm` 扩展名
 - `inotifywait` 异常退出自动重启
 - 目录完成判定加入最小存活时间保护
-- 默认保留 `SDR` 标记
+- 默认以一级子目录为批次移动到 DONE；当 `STRM_ONLY_FIRST_LEVEL_DIR=0` 时，根目录下直放的 `.strm` 也会被处理，但不会参与整目录移动
 
 ## 本地运行（Python）
 

@@ -19,6 +19,7 @@ class StrmService:
         self.last_error: str = ""
         self.lock = threading.Lock()
         self.scan_lock = threading.Lock()
+        self.restart_lock = threading.Lock()
 
     async def start(self):
         if not self.settings.enabled:
@@ -82,6 +83,22 @@ class StrmService:
             return {"ok": False, "message": f"STRM 重扫失败: {exc}"}
         finally:
             self.scan_lock.release()
+
+    async def restart(self) -> dict:
+        acquired = self.restart_lock.acquire(blocking=False)
+        if not acquired:
+            return {"ok": False, "message": "已有 STRM 重启任务在执行，请稍后再试"}
+
+        try:
+            await self.stop()
+            await self.start()
+            st = self.status()
+            if st.get("running"):
+                return {"ok": True, "message": f"STRM watcher 已重启: {self.settings.watch_dir}"}
+            err = st.get("last_error") or "重启后未进入运行状态"
+            return {"ok": False, "message": f"STRM watcher 重启失败: {err}"}
+        finally:
+            self.restart_lock.release()
 
     def status(self) -> dict:
         with self.lock:
