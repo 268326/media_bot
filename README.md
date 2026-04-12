@@ -57,6 +57,7 @@
 - 清理旧技术标签并重命名
 - 失败文件移动到 `STRM_FAILED_DIR`（保留原目录层级）
 - 一级目录空闲且达到最小存活时间后，整体移动到 `STRM_DONE_DIR`
+- 当 `STRM_ONLY_FIRST_LEVEL_DIR=0` 时，根目录下直放的 `.strm` 成功后也会直接移动到 `STRM_DONE_DIR`
 
 已内置以下稳健性优化：
 

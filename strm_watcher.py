@@ -189,6 +189,14 @@ class StrmWatcher:
         moved_to = safe_move(p, dst)
         logging.info("MOVED_FAILED\n  SRC: %s\n  DST: %s", p, moved_to)
 
+    def move_done_file(self, p: Path) -> None:
+        if not p.exists():
+            return
+        rel = p.relative_to(self.watch_dir)
+        dst = self.done_dir / rel.name
+        moved_to = safe_move(p, dst)
+        logging.info("MOVED_DONE_FILE\n  SRC: %s\n  DST: %s", p, moved_to)
+
     def move_done_folder(self, folder_key: str) -> None:
         src = self.watch_dir / folder_key
         if not src.exists():
@@ -201,39 +209,39 @@ class StrmWatcher:
         moved_to = safe_move(src, dst)
         logging.info("MOVED_DONE_FOLDER\n  SRC: %s\n  DST: %s", src, moved_to)
 
-    def process_strm_file(self, p: Path) -> bool:
+    def process_strm_file(self, p: Path) -> tuple[bool, Path | None]:
         if not p.exists():
-            return True
+            return True, p
 
         url = read_strm_url(p)
         if not url:
             logging.warning("FAIL invalid_strm_url: %s", p)
-            return False
+            return False, p
 
         data = run_ffprobe(url, self.settings)
         if not data:
             logging.warning("FAIL ffprobe_failed: %s", p)
-            return False
+            return False, p
 
         info = parse_media_info(data)
         new_name = generate_new_name(p.name, info)
 
         if new_name == p.name:
             logging.info("SKIP already_ok: %s", p)
-            return True
+            return True, p
 
         dst = p.parent / new_name
         if dst.exists():
             logging.warning("FAIL name_conflict: %s -> %s", p, dst)
-            return False
+            return False, p
 
         try:
             os.rename(p, dst)
             logging.info("RENAMED\n  OLD: %s\n  NEW: %s", p.name, new_name)
-            return True
+            return True, dst
         except Exception as exc:
             logging.warning("FAIL rename_error: %s (%s)", p, exc)
-            return False
+            return False, p
 
     def submit_one(self, p: Path, folder_key: str | None):
         if not self.executor:
@@ -246,13 +254,19 @@ class StrmWatcher:
 
         def _run():
             ok = False
+            final_path: Path | None = p
             try:
-                ok = self.process_strm_file(p)
-                if not ok:
+                ok, final_path = self.process_strm_file(p)
+                if ok and folder_key is None and final_path and final_path.exists():
                     try:
-                        self.move_failed_strm(p)
+                        self.move_done_file(final_path)
                     except Exception as exc:
-                        logging.warning("MOVE_FAILED_STRM error: %s (%s)", p, exc)
+                        logging.warning("MOVE_DONE_FILE error: %s (%s)", final_path, exc)
+                elif not ok:
+                    try:
+                        self.move_failed_strm(final_path or p)
+                    except Exception as exc:
+                        logging.warning("MOVE_FAILED_STRM error: %s (%s)", final_path or p, exc)
                 return ok
             finally:
                 self.coord.mark_finished(p)

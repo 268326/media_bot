@@ -50,11 +50,10 @@ from formatter import (
     format_help_message,
     format_start_message
 )
-from strm_handlers import router as strm_router
+from strm_service import strm_service
 
 # 创建路由器
 router = Router()
-router.include_router(strm_router)
 
 # 待添加到SA的任务字典 {message_id: {"link": str, "task": asyncio.Task, "cancelled": bool}}
 pending_sa_tasks = {}
@@ -356,6 +355,47 @@ async def cmd_danmu(message: Message):
     await message.reply_document(file, caption=caption, parse_mode="HTML")
     await wait_msg.delete()
     logging.info("✅ /danmu 完成: user=%s filename=%s cid=%s", message.from_user.id, filename, result.cid)
+
+
+@router.message(Command("strm_status"))
+async def cmd_strm_status(message: Message):
+    if not await check_user_permission(message):
+        return
+
+    st = strm_service.status()
+    text = (
+        "🧩 <b>STRM 监控状态</b>\n\n"
+        f"启用: <code>{st['enabled']}</code>\n"
+        f"已启动: <code>{st['started']}</code>\n"
+        f"运行中: <code>{st['running']}</code>\n"
+        f"WATCH_DIR: <code>{st['watch_dir'] or '-'}</code>\n"
+        f"DONE_DIR: <code>{st['done_dir'] or '-'}</code>\n"
+        f"FAILED_DIR: <code>{st['failed_dir'] or '-'}</code>\n"
+        f"LAST_ERROR: <code>{st['last_error'] or '-'}</code>"
+    )
+    await message.reply(text, parse_mode="HTML")
+
+
+@router.message(Command("strm_scan"))
+async def cmd_strm_scan(message: Message):
+    if not await check_user_permission(message):
+        return
+
+    wait_msg = await message.reply("🔄 正在触发 STRM 手动重扫…", parse_mode="HTML")
+    result = await strm_service.scan()
+    prefix = "✅" if result.get("ok") else "❌"
+    await wait_msg.edit_text(f"{prefix} {result.get('message', '未知结果')}", parse_mode="HTML")
+
+
+@router.message(Command("strm_restart"))
+async def cmd_strm_restart(message: Message):
+    if not await check_user_permission(message):
+        return
+
+    wait_msg = await message.reply("♻️ 正在重启 STRM watcher…", parse_mode="HTML")
+    result = await strm_service.restart()
+    prefix = "✅" if result.get("ok") else "❌"
+    await wait_msg.edit_text(f"{prefix} {result.get('message', '未知结果')}", parse_mode="HTML")
 
 
 @router.message(Command("hdc"))
