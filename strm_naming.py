@@ -227,17 +227,25 @@ def parse_media_info(data: dict) -> dict:
 
     v = next((s for s in streams if s.get("codec_type") == "video"), None)
     if v:
+        w = v.get("width") or 0
         h = v.get("height") or 0
+        try:
+            w = int(w)
+        except Exception:
+            w = 0
         try:
             h = int(h)
         except Exception:
             h = 0
 
-        if h >= 2160:
+        # 分辨率档位优先按宽高联合判断，兼容裁边片源：
+        # - 3840x1608 仍归类为 2160p
+        # - 1920x800 仍归类为 1080p
+        if w >= 3800 or h >= 2000:
             info["res"] = "2160p"
-        elif h >= 1080:
+        elif w >= 1900 or h >= 1000:
             info["res"] = "1080p"
-        elif h >= 720:
+        elif w >= 1200 or h >= 700:
             info["res"] = "720p"
         elif h > 0:
             info["res"] = f"{h}p"
