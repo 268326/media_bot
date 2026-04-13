@@ -36,6 +36,10 @@ class Coordinator:
         self.recent_done: dict[str, float] = {}
         self.watch_dir = Path(settings.watch_dir)
 
+    def mark_alias_inflight(self, p: Path):
+        with self.lock:
+            self.inflight_paths.add(str(p))
+
     def folder_key_for(self, path: Path) -> str | None:
         try:
             rel = path.relative_to(self.watch_dir)
@@ -239,19 +243,21 @@ class StrmWatcher:
 
         try:
             os.rename(p, dst)
+            self.coord.mark_alias_inflight(dst)
             logging.info("RENAMED\n  OLD: %s\n  NEW: %s", p.name, new_name)
             return True, dst
         except Exception as exc:
             logging.warning("FAIL rename_error: %s (%s)", p, exc)
             return False, p
 
-    def submit_one(self, p: Path, folder_key: str | None):
+    def submit_one(self, p: Path, folder_key: str | None) -> bool:
         if not self.executor:
             raise RuntimeError("executor not started")
         if not self.coord.mark_submitted(p):
             logging.debug("SKIP duplicate_submit: %s", p)
-            return
+            return False
 
+        self.coord.touch(folder_key)
         self.coord.job_started(folder_key)
 
         def _run():
@@ -278,11 +284,11 @@ class StrmWatcher:
                 self.coord.job_finished(folder_key, ok=ok)
 
         self.executor.submit(_run)
+        return True
 
     def scan_existing_and_submit(self):
         for p in self.watch_dir.rglob("*.strm"):
             folder_key = self.coord.folder_key_for(p)
-            self.coord.touch(folder_key)
             self.submit_one(p, folder_key)
 
     def finalize_loop(self):
@@ -335,7 +341,6 @@ class StrmWatcher:
 
             fp = Path(path_s)
             folder_key = self.coord.folder_key_for(fp)
-            self.coord.touch(folder_key)
             self.submit_one(fp, folder_key)
 
         return proc.wait()
