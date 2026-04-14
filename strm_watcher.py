@@ -17,6 +17,8 @@ from strm_config import StrmSettings
 from strm_naming import generate_new_name, parse_media_info
 from strm_probe import read_strm_url, run_ffprobe
 
+SUBTITLE_EXTENSIONS = (".ass", ".srt", ".sup")
+
 
 @dataclass
 class FolderState:
@@ -187,12 +189,60 @@ class StrmWatcher:
         self.done_dir.mkdir(parents=True, exist_ok=True)
         self.failed_dir.mkdir(parents=True, exist_ok=True)
 
+    def iter_sidecar_subtitles(self, strm_path: Path) -> list[Path]:
+        """查找同目录下与 strm 严格对应的字幕文件。
+
+        允许：
+        - xxx.ass
+        - xxx.zh.ass
+        - xxx.chs.default.srt
+
+        不匹配仅“前缀相似”但不真正属于该 strm 的文件。
+        """
+        results: list[Path] = []
+        stem = strm_path.stem
+        pattern = re.compile(
+            rf"^{re.escape(stem)}(?:\.[^.]+)*\.(?:ass|srt|sup)$",
+            re.IGNORECASE,
+        )
+
+        for child in strm_path.parent.iterdir():
+            if not child.is_file():
+                continue
+            if child.suffix.lower() not in SUBTITLE_EXTENSIONS:
+                continue
+            if pattern.match(child.name):
+                results.append(child)
+
+        results.sort(key=lambda x: x.name)
+        return results
+
+    def move_sidecar_subtitles(self, old_strm: Path, new_strm: Path) -> list[Path]:
+        """同步移动同目录下与 strm 同基名的字幕文件。"""
+        moved: list[Path] = []
+        old_stem = old_strm.stem
+        new_stem = new_strm.stem
+
+        for src in self.iter_sidecar_subtitles(old_strm):
+            suffix_part = src.name[len(old_stem):]
+            dst = new_strm.with_name(new_stem + suffix_part)
+            try:
+                moved_to = safe_move(src, dst)
+                self.coord.mark_alias_inflight(moved_to)
+                moved.append(moved_to)
+                logging.info("MOVED_SUBTITLE\n  SRC: %s\n  DST: %s", src, moved_to)
+            except Exception as exc:
+                logging.warning("FAIL subtitle_move_error: %s -> %s (%s)", src, dst, exc)
+
+        return moved
+
     def move_failed_strm(self, p: Path) -> None:
         if not p.exists():
             return
         rel = p.relative_to(self.watch_dir)
         dst = self.failed_dir / rel
         moved_to = safe_move(p, dst)
+        self.move_sidecar_subtitles(p, moved_to)
         logging.info("MOVED_FAILED\n  SRC: %s\n  DST: %s", p, moved_to)
 
     def move_done_file(self, p: Path) -> None:
@@ -201,6 +251,7 @@ class StrmWatcher:
         rel = p.relative_to(self.watch_dir)
         dst = self.done_dir / rel.name
         moved_to = safe_move(p, dst)
+        self.move_sidecar_subtitles(p, moved_to)
         logging.info("MOVED_DONE_FILE\n  SRC: %s\n  DST: %s", p, moved_to)
 
     def move_done_folder(self, folder_key: str) -> None:
@@ -215,40 +266,63 @@ class StrmWatcher:
         moved_to = safe_move(src, dst)
         logging.info("MOVED_DONE_FOLDER\n  SRC: %s\n  DST: %s", src, moved_to)
 
-    def process_strm_file(self, p: Path) -> tuple[bool, Path | None]:
+    def rename_sidecar_subtitles(self, old_strm: Path, new_strm: Path) -> list[Path]:
+        """同步重命名同目录下与旧 strm 同基名的字幕文件。"""
+        renamed: list[Path] = []
+        old_stem = old_strm.stem
+        new_stem = new_strm.stem
+
+        for src in self.iter_sidecar_subtitles(old_strm):
+            suffix_part = src.name[len(old_stem):]
+            dst = new_strm.with_name(new_stem + suffix_part)
+            if dst.exists():
+                logging.warning("SKIP subtitle_name_conflict: %s -> %s", src, dst)
+                continue
+            try:
+                os.rename(src, dst)
+                self.coord.mark_alias_inflight(dst)
+                renamed.append(dst)
+                logging.info("RENAMED_SUBTITLE\n  OLD: %s\n  NEW: %s", src.name, dst.name)
+            except Exception as exc:
+                logging.warning("FAIL subtitle_rename_error: %s -> %s (%s)", src, dst, exc)
+
+        return renamed
+
+    def process_strm_file(self, p: Path) -> tuple[bool, Path | None, list[Path]]:
         if not p.exists():
-            return True, p
+            return True, p, []
 
         url = read_strm_url(p)
         if not url:
             logging.warning("FAIL invalid_strm_url: %s", p)
-            return False, p
+            return False, p, []
 
         data = run_ffprobe(url, self.settings)
         if not data:
             logging.warning("FAIL ffprobe_failed: %s", p)
-            return False, p
+            return False, p, []
 
         info = parse_media_info(data)
         new_name = generate_new_name(p.name, info)
 
         if new_name == p.name:
             logging.debug("SKIP already_ok: %s", p)
-            return True, p
+            return True, p, []
 
         dst = p.parent / new_name
         if dst.exists():
             logging.warning("FAIL name_conflict: %s -> %s", p, dst)
-            return False, p
+            return False, p, []
 
         try:
             os.rename(p, dst)
             self.coord.mark_alias_inflight(dst)
+            subtitle_aliases = self.rename_sidecar_subtitles(p, dst)
             logging.info("RENAMED\n  OLD: %s\n  NEW: %s", p.name, new_name)
-            return True, dst
+            return True, dst, subtitle_aliases
         except Exception as exc:
             logging.warning("FAIL rename_error: %s (%s)", p, exc)
-            return False, p
+            return False, p, []
 
     def submit_one(self, p: Path, folder_key: str | None) -> bool:
         if not self.executor:
@@ -263,8 +337,9 @@ class StrmWatcher:
         def _run():
             ok = False
             final_path: Path | None = p
+            subtitle_aliases: list[Path] = []
             try:
-                ok, final_path = self.process_strm_file(p)
+                ok, final_path, subtitle_aliases = self.process_strm_file(p)
                 if ok and folder_key is None and final_path and final_path.exists():
                     try:
                         self.move_done_file(final_path)
@@ -280,6 +355,7 @@ class StrmWatcher:
                 alias_paths = []
                 if final_path and final_path != p:
                     alias_paths.append(final_path)
+                alias_paths.extend(subtitle_aliases)
                 self.coord.mark_finished(p, alias_paths=alias_paths)
                 self.coord.job_finished(folder_key, ok=ok)
 
