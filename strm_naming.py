@@ -113,15 +113,28 @@ def parse_fps(v_stream: dict) -> str:
     except Exception:
         return ""
 
-    common = [23.976, 24.000, 25.000, 29.970, 30.000, 50.000, 59.940, 60.000, 119.880, 120.000]
-    for c in common:
-        if abs(fps - c) < 0.02:
-            fps = c
-            break
+    # 命名统一离散到常用档位，不保留小数
+    # 23.976 / 24 → 24fps
+    # 25 → 25fps
+    # 29.97 / 30 → 30fps
+    # 50 → 50fps
+    # 59.94 / 60 → 60fps
+    # 119.88 / 120 → 120fps
+    bins = [24, 25, 30, 50, 60, 120]
+    mapped = min(bins, key=lambda x: abs(fps - x))
 
-    if abs(fps - round(fps)) < 0.001:
-        return f"{int(round(fps))}fps"
-    return f"{fps:.3f}fps"
+    # 仅在合理范围内才输出，避免异常帧率被硬映射
+    tolerance = {
+        24: 1.2,
+        25: 1.0,
+        30: 1.5,
+        50: 4.0,
+        60: 4.5,
+        120: 12.0,
+    }
+    if abs(fps - mapped) <= tolerance[mapped]:
+        return f"{mapped}fps"
+    return ""
 
 
 def parse_bit_depth(v_stream: dict) -> str:
