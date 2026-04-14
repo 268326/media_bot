@@ -34,14 +34,20 @@ def extract_source_tag(name_part: str) -> str:
 
 
 def extract_release_group(name_part: str) -> tuple[str, str]:
-    # 支持复合发布组：-GROUP、-A@B、-A&B 等
-    m = re.search(r"-(?P<grp>[A-Za-z0-9][A-Za-z0-9@&]{1,60})$", name_part)
-    if not m:
+    # 默认取扩展名前最后一个 '-' 后的字段作为发布组，
+    # 只排除明显属于技术标签的 token（如 WEB-DL / HDR10 / HEVC 等）。
+    if "-" not in name_part:
         return name_part, ""
-    grp = m.group("grp")
+
+    left, grp = name_part.rsplit("-", 1)
+    grp = grp.strip()
+    if not left or not grp:
+        return name_part, ""
+
     if grp.upper() in NOT_GROUP_TOKENS:
         return name_part, ""
-    return name_part[: m.start()], "-" + grp
+
+    return left, "-" + grp
 
 
 def cleanup_body(s: str) -> str:
