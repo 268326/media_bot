@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -236,23 +237,25 @@ class StrmWatcher:
 
         return moved
 
-    def move_failed_strm(self, p: Path) -> None:
+    def move_failed_strm(self, p: Path) -> tuple[Path | None, list[Path]]:
         if not p.exists():
-            return
+            return None, []
         rel = p.relative_to(self.watch_dir)
         dst = self.failed_dir / rel
         moved_to = safe_move(p, dst)
-        self.move_sidecar_subtitles(p, moved_to)
+        moved_subtitles = self.move_sidecar_subtitles(p, moved_to)
         logging.info("MOVED_FAILED\n  SRC: %s\n  DST: %s", p, moved_to)
+        return moved_to, moved_subtitles
 
-    def move_done_file(self, p: Path) -> None:
+    def move_done_file(self, p: Path) -> tuple[Path | None, list[Path]]:
         if not p.exists():
-            return
+            return None, []
         rel = p.relative_to(self.watch_dir)
         dst = self.done_dir / rel.name
         moved_to = safe_move(p, dst)
-        self.move_sidecar_subtitles(p, moved_to)
+        moved_subtitles = self.move_sidecar_subtitles(p, moved_to)
         logging.info("MOVED_DONE_FILE\n  SRC: %s\n  DST: %s", p, moved_to)
+        return moved_to, moved_subtitles
 
     def move_done_folder(self, folder_key: str) -> None:
         src = self.watch_dir / folder_key
@@ -338,16 +341,23 @@ class StrmWatcher:
             ok = False
             final_path: Path | None = p
             subtitle_aliases: list[Path] = []
+            final_move_paths: list[Path] = []
             try:
                 ok, final_path, subtitle_aliases = self.process_strm_file(p)
                 if ok and folder_key is None and final_path and final_path.exists():
                     try:
-                        self.move_done_file(final_path)
+                        moved_strm, moved_subtitles = self.move_done_file(final_path)
+                        if moved_strm:
+                            final_move_paths.append(moved_strm)
+                        final_move_paths.extend(moved_subtitles)
                     except Exception as exc:
                         logging.warning("MOVE_DONE_FILE error: %s (%s)", final_path, exc)
                 elif not ok:
                     try:
-                        self.move_failed_strm(final_path or p)
+                        moved_strm, moved_subtitles = self.move_failed_strm(final_path or p)
+                        if moved_strm:
+                            final_move_paths.append(moved_strm)
+                        final_move_paths.extend(moved_subtitles)
                     except Exception as exc:
                         logging.warning("MOVE_FAILED_STRM error: %s (%s)", final_path or p, exc)
                 return ok
@@ -356,6 +366,7 @@ class StrmWatcher:
                 if final_path and final_path != p:
                     alias_paths.append(final_path)
                 alias_paths.extend(subtitle_aliases)
+                alias_paths.extend(final_move_paths)
                 self.coord.mark_finished(p, alias_paths=alias_paths)
                 self.coord.job_finished(folder_key, ok=ok)
 
