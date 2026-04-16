@@ -28,6 +28,7 @@ from config import (
     SA_ENABLE_115_PUSH,
     AUTO_UNLOCK_THRESHOLD,
     LOG_PATH,
+    HDHIVE_PARSE_INCOMING_LINKS,
 )
 from danmu_service import fetch_bilibili_danmaku_xml, DanmuError
 from checkin_service import daily_check_in
@@ -823,101 +824,113 @@ async def callback_tmdb_page(callback: CallbackQuery):
 async def callback_get_resource(callback: CallbackQuery):
     """
     处理资源选择回调（点击数字按钮）
-    
+
+    关键行为：
+    - 保留原始资源选择页，便于继续点其他资源
+    - 新开一条回复消息承载“提取中 / 解锁确认 / 提取结果”
+
     Callback data 格式: tv_1:resource_id 或 movie_1:resource_id
     """
     await callback.answer()
-    
+
+    wait_msg: Message | None = None
+
     try:
-        user_id = callback.from_user.id
-        
-        # 解析回调数据
-        data_parts = callback.data.split(":")
-        if len(data_parts) != 2:
-            await callback.message.answer("❌ 数据格式错误")
+        msg = callback.message
+        if not msg:
             return
-        
+
+        user_id = callback.from_user.id
+
+        # 解析回调数据
+        data_parts = (callback.data or "").split(":")
+        if len(data_parts) != 2:
+            await msg.answer("❌ 数据格式错误")
+            return
+
         resource_id = data_parts[1]
-        
-        # 更新消息显示提取中状态
-        await callback.message.edit_text(
+
+        # 单独发一条结果消息，避免覆盖资源选择页
+        wait_msg = await msg.reply(
             f"⏳ 正在提取链接...\n🆔 <code>{resource_id}</code>",
             parse_mode="HTML"
         )
-        
+
         # 提取链接（使用会话管理）
         result = await fetch_download_link(resource_id, user_id=user_id, keep_session=True)
         website = (result or {}).get("website") or resource_website_cache.get(resource_id, "")
-        
+
         if result and result.get("need_unlock"):
             # 需要解锁
             points = result["points"]
-            
+
             # 检查是否自动解锁
             if AUTO_UNLOCK_THRESHOLD > 0 and points <= AUTO_UNLOCK_THRESHOLD:
-                # 自动解锁
                 logging.info(f"🤖 自动解锁: {points} 积分 <= {AUTO_UNLOCK_THRESHOLD} 积分阈值")
-                await callback.message.edit_text(
+                await wait_msg.edit_text(
                     f"🤖 <b>自动解锁中...</b>\n\n"
                     f"🆔 <code>{resource_id}</code>\n"
                     f"💰 消耗积分: <code>{points}</code>",
                     parse_mode="HTML"
                 )
-                
-                # 执行解锁
+
                 unlock_result = await unlock_and_fetch(resource_id, user_id=user_id)
-                
+
                 if unlock_result and unlock_result.get("link"):
                     await handle_link_extracted(
-                        callback.message,
+                        wait_msg,
                         unlock_result["link"],
                         unlock_result.get("code", "无"),
                         auto_unlock=True,
                         website=unlock_result.get("website") or website,
                     )
                 else:
-                    await notify_auto_unlock_failed(callback.message, callback.message)
+                    await notify_auto_unlock_failed(wait_msg, msg)
                 return
-            
+
             user_points = await get_user_points()
 
             if user_points is not None and user_points < points:
-                # 积分不足，关闭会话
                 session_id = result.get("session_id")
                 if session_id:
                     await session_manager.close_session(session_id)
-                
-                await callback.message.edit_text(
-                    format_error_message('insufficient_points',
+
+                await wait_msg.edit_text(
+                    format_error_message(
+                        'insufficient_points',
                         f"需要: <code>{points}</code> 积分\n"
                         f"当前: <code>{user_points}</code> 积分\n"
-                        f"缺少: <code>{points - user_points}</code> 积分"),
+                        f"缺少: <code>{points - user_points}</code> 积分"
+                    ),
                     parse_mode="HTML"
                 )
                 return
-            
-            # 询问是否解锁（会话保持打开）
+
+            # 询问是否解锁（保留资源选择页，会话保持打开）
             text, kb = format_unlock_confirmation(resource_id, points, user_points)
-            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-            
-        elif result and result.get("link"):
-            # 成功提取链接
+            await wait_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            return
+
+        if result and result.get("link"):
             await handle_link_extracted(
-                callback.message,
+                wait_msg,
                 result["link"],
                 result.get("code", "无"),
                 website=result.get("website") or website,
             )
             return
-        else:
-            await callback.message.edit_text(
-                format_error_message('fetch_failed'),
-                parse_mode="HTML"
-            )
-            
+
+        await wait_msg.edit_text(
+            format_error_message('fetch_failed'),
+            parse_mode="HTML"
+        )
+
     except Exception as e:
         logging.error(f"❌ 回调处理出错: {e}")
-        await callback.message.edit_text(f"❌ 处理出错: {e}", parse_mode="HTML")
+        if wait_msg is not None:
+            await wait_msg.edit_text(f"❌ 处理出错: {e}", parse_mode="HTML")
+        elif callback.message:
+            await callback.message.answer(f"❌ 处理出错: {e}", parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("unlock:"))
@@ -1177,6 +1190,10 @@ async def handle_direct_link(message: Message):
     
     # 如果是命令，跳过（由其他handler处理）
     if text.startswith('/'):
+        return
+
+    # 是否启用“直接发送 HDHive 链接自动解析”
+    if not HDHIVE_PARSE_INCOMING_LINKS:
         return
     
     # 获取 entities (text 或 caption_entities)

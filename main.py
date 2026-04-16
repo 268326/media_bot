@@ -40,6 +40,7 @@ from handlers import router
 from session_manager import session_manager
 from checkin_scheduler import checkin_scheduler
 from strm_service import strm_service
+from strm_notifier import strm_notifier
 
 
 async def main():
@@ -62,6 +63,8 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
 
+    await strm_notifier.start(bot)
+
     # 启动会话管理器
     await session_manager.start()
     logging.info("✅ 会话管理器已启动")
@@ -82,6 +85,9 @@ async def main():
 
         # 停止 STRM 监控服务
         await strm_service.stop()
+
+        # 停止 STRM 通知器
+        await strm_notifier.stop()
 
         # 停止会话管理器
         await session_manager.stop()

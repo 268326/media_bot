@@ -24,6 +24,14 @@ HDHIVE_OPEN_API_BASE_URL = (
     or f"{HDHIVE_BASE_URL}/api/open"
 )
 
+# 是否解析收到的 HDHive 链接（直接发送链接时自动处理；/hdt /hdm 等命令不受影响）
+HDHIVE_PARSE_INCOMING_LINKS = os.getenv("HDHIVE_PARSE_INCOMING_LINKS", "1").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # TMDB API (可选)
 TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
 
@@ -48,6 +56,10 @@ SA_TOKEN = os.getenv("SA_TOKEN", "symedia").strip() or "symedia"
 
 # 日志文件路径（兼容旧变量 HDHIVE_LOG_PATH）
 LOG_PATH = os.getenv("MEDIA_BOT_LOG_PATH", os.getenv("HDHIVE_LOG_PATH", "media_bot.log"))
+
+# STRM Telegram 通知目标（可选）
+# 支持用户、群组、频道 Chat ID；留空则不发送 STRM 通知
+TGBOT_NOTIFY_CHAT_ID = os.getenv("TGBOT_NOTIFY_CHAT_ID", "").strip()
 
 # STRM 监控配置
 STRM_WATCH_ENABLED = os.getenv("STRM_WATCH_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
@@ -140,6 +152,8 @@ def validate_config():
             warnings.append(
                 f"已启用 STRM 监控: watch={STRM_WATCH_DIR}, done={STRM_DONE_DIR}, failed={STRM_FAILED_DIR}"
             )
+            if TGBOT_NOTIFY_CHAT_ID:
+                warnings.append(f"已启用 STRM Telegram 通知: chat_id={TGBOT_NOTIFY_CHAT_ID}")
     
     # 输出错误和警告
     if errors:

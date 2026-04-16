@@ -6,7 +6,7 @@
 
 - `/hdt` 搜索剧集资源
 - `/hdm` 搜索电影资源
-- 直接发送 HDHive 链接自动解析
+- 直接发送 HDHive 链接自动解析（可通过 `HDHIVE_PARSE_INCOMING_LINKS` 开关控制）
 - 积分解锁（支持阈值自动解锁）
 - `/points` 查询积分
 - `/checkin` 手动每日签到
@@ -17,6 +17,7 @@
 - `/strm_scan` 手动触发一次 STRM 存量重扫
 - `/strm_restart` 手动重启 STRM watcher
 - 可选启用 STRM 监控：实时探测、重命名、失败归档、整目录移动到 DONE
+- 可选启用 STRM Telegram 通知：按目录批次/根目录文件聚合推送归档结果
 
 ## 环境变量
 
@@ -29,6 +30,7 @@
 
 - `ALLOWED_USER_ID`：机器人可用用户，同时也是自动签到失败通知接收人
 - `AUTO_UNLOCK_THRESHOLD`
+- `HDHIVE_PARSE_INCOMING_LINKS`：是否自动解析聊天中直接收到的 HDHive 链接（默认开启）
 - `CHECKIN_CRON`：5 段 cron，留空禁用自动签到
 - `CHECKIN_TIMEZONE`：默认 `Asia/Shanghai`
 - `TMDB_API_KEY`：关键词搜索推荐必填
@@ -38,6 +40,7 @@
 - `SA_TOKEN`
 - `SA_ENABLE_115_PUSH`
 - `MEDIA_BOT_DEBUG`：是否输出调试日志（true/false）
+- `TGBOT_NOTIFY_CHAT_ID`：STRM 归档通知接收目标（用户/群组/频道 Chat ID）
 - `STRM_WATCH_ENABLED`：是否启用 STRM 监控
 - `STRM_WATCH_DIR` / `STRM_DONE_DIR` / `STRM_FAILED_DIR`
 - `STRM_FFPROBE_PATH`：默认 `/usr/local/bin/ffprobe`
@@ -47,6 +50,7 @@
 - 关键词搜索依赖 TMDB API，因此 `/hdt` 和 `/hdm` 建议同时配置 `TMDB_API_KEY`
 - `/points`、`/checkin` 和自动签到依赖 HDHive Premium 权限对应的 Open API
 - `MEDIA_BOT_DEBUG=true` 时会输出 DEBUG 日志，便于排查问题
+- `TGBOT_NOTIFY_CHAT_ID` 配置后，STRM 在归档根目录文件或完成目录批次归档时会发送 Telegram 汇总通知
 - STRM 监控依赖系统中的 `ffprobe` 和 `inotifywait`，Dockerfile 已自动安装
 
 ## STRM 监控说明

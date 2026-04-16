@@ -17,6 +17,7 @@ from pathlib import Path
 from strm_config import StrmSettings
 from strm_naming import generate_new_name, parse_media_info
 from strm_probe import read_strm_url, run_ffprobe
+from strm_notifier import strm_notifier
 
 SUBTITLE_EXTENSIONS = (".ass", ".srt", ".sup")
 
@@ -163,6 +164,16 @@ def safe_move(src: Path, dst: Path) -> Path:
     return dst
 
 
+@dataclass
+class ProcessOutcome:
+    ok: bool
+    final_path: Path | None
+    subtitle_aliases: list[Path] = field(default_factory=list)
+    renamed: bool = False
+    already_ok: bool = False
+    reason: str = ""
+
+
 class StrmWatcher:
     def __init__(self, settings: StrmSettings):
         self.settings = settings
@@ -231,7 +242,7 @@ class StrmWatcher:
                 moved_to = safe_move(src, dst)
                 self.coord.mark_alias_inflight(moved_to)
                 moved.append(moved_to)
-                logging.info("MOVED_SUBTITLE\n  SRC: %s\n  DST: %s", src, moved_to)
+                logging.info("📎 字幕已移动\n   ├─ 源文件: %s\n   └─ 目标:   %s", src, moved_to)
             except Exception as exc:
                 logging.warning("FAIL subtitle_move_error: %s -> %s (%s)", src, dst, exc)
 
@@ -244,7 +255,7 @@ class StrmWatcher:
         dst = self.failed_dir / rel
         moved_to = safe_move(p, dst)
         moved_subtitles = self.move_sidecar_subtitles(p, moved_to)
-        logging.info("MOVED_FAILED\n  SRC: %s\n  DST: %s", p, moved_to)
+        logging.warning("❌ STRM 处理失败并已转移\n   ├─ 源文件: %s\n   ├─ 目标:   %s\n   └─ 字幕数: %s", p, moved_to, len(moved_subtitles))
         return moved_to, moved_subtitles
 
     def move_done_file(self, p: Path) -> tuple[Path | None, list[Path]]:
@@ -254,7 +265,7 @@ class StrmWatcher:
         dst = self.done_dir / rel.name
         moved_to = safe_move(p, dst)
         moved_subtitles = self.move_sidecar_subtitles(p, moved_to)
-        logging.info("MOVED_DONE_FILE\n  SRC: %s\n  DST: %s", p, moved_to)
+        logging.info("✅ STRM 文件已归档\n   ├─ 源文件: %s\n   ├─ 目标:   %s\n   └─ 字幕数: %s", p, moved_to, len(moved_subtitles))
         return moved_to, moved_subtitles
 
     def move_done_folder(self, folder_key: str) -> None:
@@ -267,7 +278,22 @@ class StrmWatcher:
 
         dst = self.done_dir / folder_key
         moved_to = safe_move(src, dst)
-        logging.info("MOVED_DONE_FOLDER\n  SRC: %s\n  DST: %s", src, moved_to)
+        strm_count = sum(1 for _ in moved_to.rglob("*.strm"))
+        subtitle_count = sum(1 for _ in moved_to.rglob("*.ass"))
+        subtitle_count += sum(1 for _ in moved_to.rglob("*.srt"))
+        subtitle_count += sum(1 for _ in moved_to.rglob("*.sup"))
+        logging.info(
+            "📦 STRM 目录已归档\n"
+            "   ├─ 目录:   %s\n"
+            "   ├─ 目标:   %s\n"
+            "   ├─ STRM:  %s\n"
+            "   └─ 字幕:  %s",
+            src,
+            moved_to,
+            strm_count,
+            subtitle_count,
+        )
+        strm_notifier.record_folder_completed(folder_key, src, moved_to)
 
     def rename_sidecar_subtitles(self, old_strm: Path, new_strm: Path) -> list[Path]:
         """同步重命名同目录下与旧 strm 同基名的字幕文件。"""
@@ -285,47 +311,52 @@ class StrmWatcher:
                 os.rename(src, dst)
                 self.coord.mark_alias_inflight(dst)
                 renamed.append(dst)
-                logging.info("RENAMED_SUBTITLE\n  OLD: %s\n  NEW: %s", src.name, dst.name)
+                logging.info("📝 字幕已重命名\n   ├─ 旧名: %s\n   └─ 新名: %s", src.name, dst.name)
             except Exception as exc:
                 logging.warning("FAIL subtitle_rename_error: %s -> %s (%s)", src, dst, exc)
 
         return renamed
 
-    def process_strm_file(self, p: Path) -> tuple[bool, Path | None, list[Path]]:
+    def process_strm_file(self, p: Path) -> ProcessOutcome:
         if not p.exists():
-            return True, p, []
+            return ProcessOutcome(ok=True, final_path=p, already_ok=True)
 
         url = read_strm_url(p)
         if not url:
             logging.warning("FAIL invalid_strm_url: %s", p)
-            return False, p, []
+            return ProcessOutcome(ok=False, final_path=p, reason="invalid_strm_url")
 
         data = run_ffprobe(url, self.settings)
         if not data:
             logging.warning("FAIL ffprobe_failed: %s", p)
-            return False, p, []
+            return ProcessOutcome(ok=False, final_path=p, reason="ffprobe_failed")
 
         info = parse_media_info(data)
         new_name = generate_new_name(p.name, info)
 
         if new_name == p.name:
             logging.debug("SKIP already_ok: %s", p)
-            return True, p, []
+            return ProcessOutcome(ok=True, final_path=p, already_ok=True)
 
         dst = p.parent / new_name
         if dst.exists():
             logging.warning("FAIL name_conflict: %s -> %s", p, dst)
-            return False, p, []
+            return ProcessOutcome(ok=False, final_path=p, reason="name_conflict")
 
         try:
             os.rename(p, dst)
             self.coord.mark_alias_inflight(dst)
             subtitle_aliases = self.rename_sidecar_subtitles(p, dst)
-            logging.info("RENAMED\n  OLD: %s\n  NEW: %s", p.name, new_name)
-            return True, dst, subtitle_aliases
+            logging.info("🎬 STRM 已重命名\n   ├─ 旧名: %s\n   ├─ 新名: %s\n   └─ 字幕: %s", p.name, new_name, len(subtitle_aliases))
+            return ProcessOutcome(
+                ok=True,
+                final_path=dst,
+                subtitle_aliases=subtitle_aliases,
+                renamed=True,
+            )
         except Exception as exc:
             logging.warning("FAIL rename_error: %s (%s)", p, exc)
-            return False, p, []
+            return ProcessOutcome(ok=False, final_path=p, reason=f"rename_error: {exc}")
 
     def submit_one(self, p: Path, folder_key: str | None) -> bool:
         if not self.executor:
@@ -342,13 +373,40 @@ class StrmWatcher:
             final_path: Path | None = p
             subtitle_aliases: list[Path] = []
             final_move_paths: list[Path] = []
+            renamed = False
+            already_ok = False
+            reason = ""
             try:
-                ok, final_path, subtitle_aliases = self.process_strm_file(p)
+                outcome = self.process_strm_file(p)
+                ok = outcome.ok
+                final_path = outcome.final_path
+                subtitle_aliases = outcome.subtitle_aliases
+                renamed = outcome.renamed
+                already_ok = outcome.already_ok
+                reason = outcome.reason
+                strm_notifier.record_process_result(
+                    folder_key,
+                    final_path or p,
+                    source_name=p.name,
+                    target_name=(final_path.name if final_path else p.name),
+                    ok=ok,
+                    renamed=renamed,
+                    already_ok=already_ok,
+                    subtitle_count=len(subtitle_aliases),
+                    reason=reason,
+                )
+
                 if ok and folder_key is None and final_path and final_path.exists():
                     try:
                         moved_strm, moved_subtitles = self.move_done_file(final_path)
                         if moved_strm:
                             final_move_paths.append(moved_strm)
+                            strm_notifier.record_root_completed(
+                                final_path,
+                                moved_strm,
+                                ok=True,
+                                subtitle_count=len(moved_subtitles) + len(subtitle_aliases),
+                            )
                         final_move_paths.extend(moved_subtitles)
                     except Exception as exc:
                         logging.warning("MOVE_DONE_FILE error: %s (%s)", final_path, exc)
@@ -357,6 +415,13 @@ class StrmWatcher:
                         moved_strm, moved_subtitles = self.move_failed_strm(final_path or p)
                         if moved_strm:
                             final_move_paths.append(moved_strm)
+                            strm_notifier.record_root_completed(
+                                final_path or p,
+                                moved_strm,
+                                ok=False,
+                                subtitle_count=len(moved_subtitles) + len(subtitle_aliases),
+                                reason=reason,
+                            )
                         final_move_paths.extend(moved_subtitles)
                     except Exception as exc:
                         logging.warning("MOVE_FAILED_STRM error: %s (%s)", final_path or p, exc)
