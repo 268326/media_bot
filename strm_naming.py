@@ -69,8 +69,11 @@ def build_wipe_regex(info: dict, has_source: bool) -> re.Pattern | None:
         alts.append(r"2160p|1080p|720p|1080i|720i|4k|8k|UHD")
     if info.get("fps"):
         alts.append(r"\d+(?:\.\d+)?fps")
-    if info.get("hdr"):
-        alts.append(r"SDR|HDR10\+|HDR10|HDR|HLG|Dolby[\s.\-_]?Vision|DoVi|\bDV\b|DVP\d")
+
+    # HDR / Dolby Vision 旧标签统一清洗，避免输出规则调整后旧写法残留。
+    alts.append(
+        r"SDR|HDR10\+|HDR10|HDR|HLG|Dolby[\s.\-_]*Vision(?:[\s.\-_]*Profile)?(?:[\s.\-_]*\d+)?|DoVi(?:[\s.\-_]*P\d+)?|\bDV\b(?:[\s.\-_]*(?:P|Profile)[\s.\-_]*\d+)?|DVP(?:[\s.\-_]*\d+)?"
+    )
     if info.get("v_codec"):
         alts.append(r"H\.?264|X\.?264|AVC|H\.?265|X\.?265|HEVC|AV1")
     if info.get("a_codec"):
@@ -82,7 +85,7 @@ def build_wipe_regex(info: dict, has_source: bool) -> re.Pattern | None:
         alts.append(r"TrueHD[\s.\-_]?[1257]\.[01]")
         alts.append(r"AAC[\s.\-_]?[1257]\.[01]|FLAC[\s.\-_]?[1257]\.[01]|OPUS[\s.\-_]?[1257]\.[01]")
         alts.append(r"DTS-HD[\s.\-_]?(?:MA|HRA)?|DTS")
-        alts.append(r"DDP|EAC3|DD\+|AC3|TrueHD|Dolby|AAC|FLAC|OPUS")
+        alts.append(r"DDP|EAC3|DD\+|AC3|DD|TrueHD|Dolby|AAC|FLAC|OPUS")
         alts.append(r"[1257]\.[01]")
     if info.get("depth"):
         alts.append(r"(?:8|10|12|14|16)bit")
@@ -172,26 +175,33 @@ def parse_hdr(v_stream: dict) -> str:
     hdr_tags: list[str] = []
 
     side = v_stream.get("side_data_list") or []
-    if isinstance(side, list):
-        dovi = next((sd for sd in side if "DOVI" in str(sd.get("side_data_type", "")).upper()), None)
-        if dovi:
-            prof = dovi.get("dv_profile")
-            hdr_tags.append(f"DVP{prof}" if isinstance(prof, int) else "DV")
+    if not isinstance(side, list):
+        side = []
+
+    has_dv = False
+    dovi = next((sd for sd in side if "DOVI" in str(sd.get("side_data_type", "")).upper()), None)
+    if dovi:
+        has_dv = True
+        prof = dovi.get("dv_profile")
+        hdr_tags.append(f"DV P{prof}" if isinstance(prof, int) else "DV")
 
     tr = (v_stream.get("color_transfer") or "").lower()
     if tr == "arib-std-b67":
         hdr_tags.append("HLG")
     elif tr == "smpte2084":
         is_hdr10p = False
-        if isinstance(side, list):
-            for sd in side:
-                s = json.dumps(sd, ensure_ascii=False)
-                if "HDR Dynamic Metadata" in s or "dynamic_hdr_plus" in s.lower() or "hdr10+" in s.lower():
-                    is_hdr10p = True
-                    break
+        for sd in side:
+            s = json.dumps(sd, ensure_ascii=False)
+            if "HDR Dynamic Metadata" in s or "dynamic_hdr_plus" in s.lower() or "hdr10+" in s.lower():
+                is_hdr10p = True
+                break
         hdr_tags.append("HDR10+" if is_hdr10p else "HDR10")
 
-    return ".".join(hdr_tags) if hdr_tags else "SDR"
+    if hdr_tags:
+        return ".".join(hdr_tags)
+    if has_dv:
+        return hdr_tags[0] if hdr_tags else "DV"
+    return "SDR"
 
 
 def choose_audio_stream(streams: list[dict]) -> dict | None:
