@@ -12,6 +12,7 @@ services:
       - TZ=Asia/Shanghai
     volumes:
       - ./.env:/app/.env:ro
+      - ./data:/app/data
     shm_size: '2gb'
     logging:
       driver: "json-file"

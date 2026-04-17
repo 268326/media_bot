@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from strm_batch_state import StrmBatchState
 from strm_config import StrmSettings
 from strm_naming import generate_new_name, parse_media_info
 from strm_probe import read_strm_url, run_ffprobe
@@ -180,7 +181,9 @@ class StrmWatcher:
         self.watch_dir = Path(settings.watch_dir)
         self.done_dir = Path(settings.done_dir)
         self.failed_dir = Path(settings.failed_dir)
+        self.state_dir = Path(settings.state_dir)
         self.coord = Coordinator(settings)
+        self.batch_state = StrmBatchState(settings.state_dir)
         self.stop_evt = threading.Event()
         self.executor: ThreadPoolExecutor | None = None
         self.finalizer_thread: threading.Thread | None = None
@@ -200,6 +203,26 @@ class StrmWatcher:
             raise RuntimeError("DONE_DIR/FAILED_DIR must NOT be inside WATCH_DIR (to avoid infinite loop)")
         self.done_dir.mkdir(parents=True, exist_ok=True)
         self.failed_dir.mkdir(parents=True, exist_ok=True)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+
+    def rel_strm_path(self, p: Path) -> str:
+        return str(p.relative_to(self.watch_dir))
+
+    def list_folder_rel_paths(self, folder_key: str) -> list[str]:
+        src = self.watch_dir / folder_key
+        if not src.exists() or not src.is_dir():
+            return []
+        rel_paths: list[str] = []
+        for p in src.rglob("*.strm"):
+            try:
+                rel_paths.append(self.rel_strm_path(p))
+            except Exception:
+                continue
+        rel_paths.sort()
+        return rel_paths
+
+    def reconcile_folder_manifest(self, folder_key: str) -> dict:
+        return self.batch_state.reconcile(folder_key, self.list_folder_rel_paths(folder_key))
 
     def iter_sidecar_subtitles(self, strm_path: Path) -> list[Path]:
         """查找同目录下与 strm 严格对应的字幕文件。
@@ -272,10 +295,12 @@ class StrmWatcher:
         src = self.watch_dir / folder_key
         if not src.exists():
             logging.warning("⚠️ STRM 目录归档跳过\n   ├─ 目录:   %s\n   └─ 原因:   source_missing", src)
+            self.batch_state.mark_folder_failed(folder_key, "source_missing")
             strm_notifier.record_folder_failed(folder_key, src, self.done_dir / folder_key, reason="source_missing")
             return
         if not src.is_dir():
             logging.warning("⚠️ STRM 目录归档跳过\n   ├─ 路径:   %s\n   └─ 原因:   not_a_directory", src)
+            self.batch_state.mark_folder_failed(folder_key, "not_a_directory")
             strm_notifier.record_folder_failed(folder_key, src, self.done_dir / folder_key, reason="not_a_directory")
             return
 
@@ -298,6 +323,7 @@ class StrmWatcher:
             strm_count,
             subtitle_count,
         )
+        self.batch_state.mark_folder_completed(folder_key)
         strm_notifier.record_folder_completed(folder_key, src, moved_to)
 
     def rename_sidecar_subtitles(self, old_strm: Path, new_strm: Path) -> list[Path]:
@@ -370,6 +396,15 @@ class StrmWatcher:
             logging.debug("SKIP duplicate_submit: %s", p)
             return False
 
+        rel_path = self.rel_strm_path(p)
+        if folder_key is not None:
+            self.batch_state.mark_processing(
+                folder_key,
+                rel_path,
+                source_name=p.name,
+                lease_seconds=self.settings.processing_lease_seconds,
+            )
+
         self.coord.touch(folder_key)
         self.coord.job_started(folder_key)
 
@@ -400,6 +435,27 @@ class StrmWatcher:
                     subtitle_count=len(subtitle_aliases),
                     reason=reason,
                 )
+
+                if folder_key is not None:
+                    final_rel_path = self.rel_strm_path(final_path) if final_path and final_path.exists() and is_subpath(final_path, self.watch_dir) else rel_path
+                    if ok:
+                        self.batch_state.mark_completed(
+                            folder_key,
+                            rel_path,
+                            final_rel_path,
+                            source_name=p.name,
+                            target_name=(final_path.name if final_path else p.name),
+                            status=("already_ok" if already_ok else "done"),
+                            reason=reason,
+                        )
+                    else:
+                        self.batch_state.mark_failed(
+                            folder_key,
+                            rel_path,
+                            source_name=p.name,
+                            target_name=(final_path.name if final_path else p.name),
+                            reason=reason or "unknown",
+                        )
 
                 if ok and folder_key is None and final_path and final_path.exists():
                     try:
@@ -477,15 +533,52 @@ class StrmWatcher:
         return True
 
     def scan_existing_and_submit(self):
+        seen_folders: set[str] = set()
         for p in self.watch_dir.rglob("*.strm"):
             folder_key = self.coord.folder_key_for(p)
+            if folder_key is not None and folder_key not in seen_folders:
+                self.reconcile_folder_manifest(folder_key)
+                seen_folders.add(folder_key)
             self.submit_one(p, folder_key)
 
     def finalize_loop(self):
+        last_cleanup_at = 0.0
         while not self.stop_evt.is_set():
             now = time.time()
+            if (now - last_cleanup_at) >= 3600:
+                self.batch_state.cleanup_expired_manifests(self.settings.state_retention_hours)
+                last_cleanup_at = now
             for st in self.coord.snapshot():
                 if self.coord.can_finalize(st, now):
+                    decision = self.batch_state.finalize_decision(st.rel_folder, self.list_folder_rel_paths(st.rel_folder))
+                    if not decision.get("ready"):
+                        self.coord.touch(st.rel_folder)
+                        logging.info(
+                            "⏳ STRM 批次暂不归档\n"
+                            "   ├─ 批次:   %s\n"
+                            "   ├─ pending:   %s\n"
+                            "   ├─ processing:%s\n"
+                            "   ├─ done:      %s\n"
+                            "   ├─ already_ok:%s\n"
+                            "   ├─ failed:    %s\n"
+                            "   ├─ missing:   %s\n"
+                            "   ├─ new_items: %s\n"
+                            "   ├─ reset_proc:%s\n"
+                            "   └─ 示例:      %s",
+                            st.rel_folder,
+                            decision["counts"].get("pending", 0),
+                            decision["counts"].get("processing", 0),
+                            decision["counts"].get("done", 0),
+                            decision["counts"].get("already_ok", 0),
+                            decision["counts"].get("failed", 0),
+                            decision["counts"].get("missing", 0),
+                            decision.get("new_items", 0),
+                            decision.get("reset_processing", 0),
+                            ", ".join(decision.get("samples") or []) or "-",
+                        )
+                        for rel_path in self.list_folder_rel_paths(st.rel_folder):
+                            self.submit_one(self.watch_dir / rel_path, st.rel_folder)
+                        continue
                     try:
                         self.move_done_folder(st.rel_folder)
                     except Exception as exc:
@@ -503,10 +596,28 @@ class StrmWatcher:
                             dst,
                             exc,
                         )
+                        self.batch_state.mark_folder_failed(st.rel_folder, reason)
                         strm_notifier.record_folder_failed(st.rel_folder, src, dst, reason=reason)
                     finally:
                         self.coord.remove(st.rel_folder)
             self.stop_evt.wait(2)
+
+    def batch_status(self) -> dict:
+        summaries = self.batch_state.list_manifests_summary()
+        active = [item for item in summaries if str(item.get("status") or "") == "active"]
+        blocked = [
+            item for item in active
+            if item.get("counts", {}).get("pending", 0)
+            or item.get("counts", {}).get("processing", 0)
+            or item.get("counts", {}).get("missing", 0)
+        ]
+        return {
+            "state_dir": str(self.state_dir),
+            "manifest_total": len(summaries),
+            "active_total": len(active),
+            "blocked_total": len(blocked),
+            "batches": summaries[:8],
+        }
 
     def run_inotify_once(self) -> int:
         cmd = [
@@ -545,6 +656,8 @@ class StrmWatcher:
 
             fp = Path(path_s)
             folder_key = self.coord.folder_key_for(fp)
+            if folder_key is not None:
+                self.reconcile_folder_manifest(folder_key)
             self.submit_one(fp, folder_key)
 
         return proc.wait()
@@ -566,12 +679,15 @@ class StrmWatcher:
     def start(self):
         self.validate()
         self.executor = ThreadPoolExecutor(max_workers=self.settings.max_workers, thread_name_prefix="strm")
+        for st in self.watch_dir.iterdir():
+            if st.is_dir():
+                self.reconcile_folder_manifest(st.name)
         self.scan_existing_and_submit()
         self.finalizer_thread = threading.Thread(target=self.finalize_loop, daemon=True, name="strm-finalizer")
         self.finalizer_thread.start()
         self.watcher_thread = threading.Thread(target=self.watch_loop, daemon=True, name="strm-watcher")
         self.watcher_thread.start()
-        logging.info("✅ STRM watcher started: watch_dir=%s", self.watch_dir)
+        logging.info("✅ STRM watcher started: watch_dir=%s, state_dir=%s", self.watch_dir, self.state_dir)
 
     def stop(self):
         self.stop_evt.set()

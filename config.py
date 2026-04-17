@@ -67,6 +67,9 @@ STRM_FFPROBE_PATH = os.getenv("STRM_FFPROBE_PATH", "/usr/local/bin/ffprobe").str
 STRM_WATCH_DIR = os.getenv("STRM_WATCH_DIR", "").strip()
 STRM_DONE_DIR = os.getenv("STRM_DONE_DIR", "").strip()
 STRM_FAILED_DIR = os.getenv("STRM_FAILED_DIR", "").strip()
+STRM_STATE_DIR = os.getenv("STRM_STATE_DIR", "/app/data/strm_state").strip() or "/app/data/strm_state"
+STRM_PROCESSING_LEASE_SECONDS = int(os.getenv("STRM_PROCESSING_LEASE_SECONDS", "1800"))
+STRM_STATE_RETENTION_HOURS = int(os.getenv("STRM_STATE_RETENTION_HOURS", "168"))
 STRM_MAX_WORKERS = int(os.getenv("STRM_MAX_WORKERS", "3"))
 STRM_TIMEOUT_S = int(os.getenv("STRM_TIMEOUT_S", "60"))
 STRM_MAX_RETRIES = int(os.getenv("STRM_MAX_RETRIES", "2"))
@@ -84,6 +87,9 @@ STRM_SETTINGS = StrmSettings(
     watch_dir=STRM_WATCH_DIR,
     done_dir=STRM_DONE_DIR,
     failed_dir=STRM_FAILED_DIR,
+    state_dir=STRM_STATE_DIR,
+    processing_lease_seconds=STRM_PROCESSING_LEASE_SECONDS,
+    state_retention_hours=STRM_STATE_RETENTION_HOURS,
     max_workers=STRM_MAX_WORKERS,
     timeout_s=STRM_TIMEOUT_S,
     max_retries=STRM_MAX_RETRIES,
@@ -146,11 +152,13 @@ def validate_config():
             missing.append("STRM_DONE_DIR")
         if not STRM_FAILED_DIR:
             missing.append("STRM_FAILED_DIR")
+        if not STRM_STATE_DIR:
+            missing.append("STRM_STATE_DIR")
         if missing:
             errors.append(f"已启用 STRM_WATCH_ENABLED，但缺少配置: {', '.join(missing)}")
         else:
             warnings.append(
-                f"已启用 STRM 监控: watch={STRM_WATCH_DIR}, done={STRM_DONE_DIR}, failed={STRM_FAILED_DIR}"
+                f"已启用 STRM 监控: watch={STRM_WATCH_DIR}, done={STRM_DONE_DIR}, failed={STRM_FAILED_DIR}, state={STRM_STATE_DIR}"
             )
             if TGBOT_NOTIFY_CHAT_ID:
                 warnings.append(f"已启用 STRM Telegram 通知: chat_id={TGBOT_NOTIFY_CHAT_ID}")

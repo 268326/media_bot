@@ -44,6 +44,9 @@
 - `STRM_WATCH_ENABLED`：是否启用 STRM 监控
 - `STRM_WATCH_DIR` / `STRM_DONE_DIR` / `STRM_FAILED_DIR`
 - `STRM_FFPROBE_PATH`：默认 `/usr/local/bin/ffprobe`
+- `STRM_STATE_DIR`：manifest 批次状态目录，默认 `/app/data/strm_state`
+- `STRM_PROCESSING_LEASE_SECONDS`：processing 租约，默认 `1800`
+- `STRM_STATE_RETENTION_HOURS`：已完成/失败 manifest 自动清理保留期，默认 `168`
 
 说明：
 
@@ -58,19 +61,28 @@
 启用后，后台会递归监控 `STRM_WATCH_DIR` 下的 `.strm` 文件：
 
 - 监听 `close_write/moved_to`
+- 首次扫描或增量事件到达时，为每个一级目录生成并更新一份 manifest 批次计划
 - 读取 `.strm` 内 URL
 - 用 `ffprobe` 探测媒体信息
 - 清理旧技术标签并重命名
+- 每完成一个 `.strm`，立即把对应 manifest 条目标记为 `done / already_ok / failed`
 - 失败文件移动到 `STRM_FAILED_DIR`（保留原目录层级）
-- 一级目录空闲且达到最小存活时间后，整体移动到 `STRM_DONE_DIR`
+- 一级目录空闲且达到最小存活时间后，会先重新扫描目录并与 manifest 对账：
+  - 若发现新增 `.strm`，会加入计划并继续处理
+  - 若计划里仍有 `pending / processing / missing`，不会归档
+  - 仅当计划闭环后，才整体移动到 `STRM_DONE_DIR`
 - 当 `STRM_ONLY_FIRST_LEVEL_DIR=0` 时，根目录下直放的 `.strm` 成功后也会直接移动到 `STRM_DONE_DIR`
 
 已内置以下稳健性优化：
 
 - 同一路径去重，避免重复提交
+- manifest 持久化到 `STRM_STATE_DIR`，支持容器重启后恢复批次状态
+- `processing` 条目带租约时间，异常退出后会自动回退到 `pending`
+- 已完成/失败的 manifest 会按 `STRM_STATE_RETENTION_HOURS` 自动清理，避免状态目录长期膨胀
+- 批量导入推荐参数：`STRM_IDLE_SECONDS=120`、`STRM_MIN_FOLDER_AGE_SECONDS=300`、`STRM_ONLY_FIRST_LEVEL_DIR=1`
 - 失败移动保留 `.strm` 扩展名
 - `inotifywait` 异常退出自动重启
-- 目录完成判定加入最小存活时间保护
+- 目录完成判定不再依赖最终全量 `ffprobe` 复查，而是依赖 manifest 闭环 + 目录重扫对账
 - 默认以一级子目录为批次移动到 DONE；当 `STRM_ONLY_FIRST_LEVEL_DIR=0` 时，根目录下直放的 `.strm` 也会被处理，但不会参与整目录移动
 
 ## 本地运行（Python）

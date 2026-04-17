@@ -103,7 +103,7 @@ class StrmService:
     def status(self) -> dict:
         with self.lock:
             watcher = self.watcher
-            return {
+            base = {
                 "enabled": self.settings.enabled,
                 "started": self.started,
                 "running": bool(watcher and watcher.is_running()),
@@ -112,6 +112,20 @@ class StrmService:
                 "failed_dir": self.settings.failed_dir,
                 "last_error": self.last_error,
             }
+        if watcher:
+            try:
+                base.update(watcher.batch_status())
+            except Exception as exc:
+                base["batch_status_error"] = str(exc)
+        else:
+            base.update({
+                "state_dir": self.settings.state_dir,
+                "manifest_total": 0,
+                "active_total": 0,
+                "blocked_total": 0,
+                "batches": [],
+            })
+        return base
 
 
 strm_service = StrmService()

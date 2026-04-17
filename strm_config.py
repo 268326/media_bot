@@ -13,6 +13,9 @@ class StrmSettings:
     watch_dir: str = ""
     done_dir: str = ""
     failed_dir: str = ""
+    state_dir: str = "/app/data/strm_state"
+    processing_lease_seconds: int = 1800
+    state_retention_hours: int = 168
     max_workers: int = 3
     timeout_s: int = 60
     max_retries: int = 2
