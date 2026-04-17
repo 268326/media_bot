@@ -34,8 +34,8 @@ def extract_source_tag(name_part: str) -> str:
 
 
 def extract_release_group(name_part: str) -> tuple[str, str]:
-    # 默认取扩展名前最后一个 '-' 后的字段作为发布组，
-    # 只排除明显属于技术标签的 token（如 WEB-DL / HDR10 / HEVC 等）。
+    # 仅把“末尾独立发布组”识别为 release group，避免把 WEB-DL 这类
+    # 技术标签中的连字符误判成发布组分隔符。
     if "-" not in name_part:
         return name_part, ""
 
@@ -44,7 +44,13 @@ def extract_release_group(name_part: str) -> tuple[str, str]:
     if not left or not grp:
         return name_part, ""
 
-    if grp.upper() in NOT_GROUP_TOKENS:
+    grp_upper = grp.upper()
+    if grp_upper in NOT_GROUP_TOKENS:
+        return name_part, ""
+
+    # 发布组通常是末尾一个相对独立的 token；若包含点/空格等更像技术标签片段，
+    # 则不要当作发布组，避免把 "WEB-DL" 拆成 "WEB" + "-DL"。
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", grp):
         return name_part, ""
 
     return left, "-" + grp
