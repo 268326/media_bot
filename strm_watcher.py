@@ -271,9 +271,12 @@ class StrmWatcher:
     def move_done_folder(self, folder_key: str) -> None:
         src = self.watch_dir / folder_key
         if not src.exists():
+            logging.warning("⚠️ STRM 目录归档跳过\n   ├─ 目录:   %s\n   └─ 原因:   source_missing", src)
+            strm_notifier.record_folder_failed(folder_key, src, self.done_dir / folder_key, reason="source_missing")
             return
         if not src.is_dir():
-            logging.debug("SKIP move_done_not_dir: %s", src)
+            logging.warning("⚠️ STRM 目录归档跳过\n   ├─ 路径:   %s\n   └─ 原因:   not_a_directory", src)
+            strm_notifier.record_folder_failed(folder_key, src, self.done_dir / folder_key, reason="not_a_directory")
             return
 
         dst = self.done_dir / folder_key
@@ -284,10 +287,12 @@ class StrmWatcher:
         subtitle_count += sum(1 for _ in moved_to.rglob("*.sup"))
         logging.info(
             "📦 STRM 目录已归档\n"
+            "   ├─ 批次:   %s\n"
             "   ├─ 目录:   %s\n"
             "   ├─ 目标:   %s\n"
             "   ├─ STRM:  %s\n"
             "   └─ 字幕:  %s",
+            folder_key,
             src,
             moved_to,
             strm_count,
@@ -409,7 +414,23 @@ class StrmWatcher:
                             )
                         final_move_paths.extend(moved_subtitles)
                     except Exception as exc:
-                        logging.warning("MOVE_DONE_FILE error: %s (%s)", final_path, exc)
+                        reason = f"move_done_file_error: {exc}"
+                        logging.warning(
+                            "❌ STRM 单文件归档失败\n"
+                            "   ├─ 文件:   %s\n"
+                            "   ├─ 目标:   %s\n"
+                            "   └─ 原因:   %s",
+                            final_path,
+                            self.done_dir / final_path.name,
+                            exc,
+                        )
+                        strm_notifier.record_root_completed(
+                            final_path,
+                            final_path,
+                            ok=False,
+                            subtitle_count=len(subtitle_aliases),
+                            reason=reason,
+                        )
                 elif not ok:
                     try:
                         moved_strm, moved_subtitles = self.move_failed_strm(final_path or p)
@@ -424,7 +445,24 @@ class StrmWatcher:
                             )
                         final_move_paths.extend(moved_subtitles)
                     except Exception as exc:
-                        logging.warning("MOVE_FAILED_STRM error: %s (%s)", final_path or p, exc)
+                        move_reason = f"move_failed_strm_error: {exc}"
+                        failed_src = final_path or p
+                        logging.warning(
+                            "❌ STRM 失败文件转移失败\n"
+                            "   ├─ 文件:   %s\n"
+                            "   ├─ 目标:   %s\n"
+                            "   └─ 原因:   %s",
+                            failed_src,
+                            self.failed_dir / failed_src.relative_to(self.watch_dir),
+                            exc,
+                        )
+                        strm_notifier.record_root_completed(
+                            failed_src,
+                            failed_src,
+                            ok=False,
+                            subtitle_count=len(subtitle_aliases),
+                            reason=(reason + " | " + move_reason).strip(" |"),
+                        )
                 return ok
             finally:
                 alias_paths = []
@@ -451,7 +489,21 @@ class StrmWatcher:
                     try:
                         self.move_done_folder(st.rel_folder)
                     except Exception as exc:
-                        logging.warning("MOVE_DONE_FOLDER failed for %s: %s", st.rel_folder, exc)
+                        src = self.watch_dir / st.rel_folder
+                        dst = self.done_dir / st.rel_folder
+                        reason = f"move_done_folder_error: {exc}"
+                        logging.warning(
+                            "❌ STRM 目录归档失败\n"
+                            "   ├─ 批次:   %s\n"
+                            "   ├─ 目录:   %s\n"
+                            "   ├─ 目标:   %s\n"
+                            "   └─ 原因:   %s",
+                            st.rel_folder,
+                            src,
+                            dst,
+                            exc,
+                        )
+                        strm_notifier.record_folder_failed(st.rel_folder, src, dst, reason=reason)
                     finally:
                         self.coord.remove(st.rel_folder)
             self.stop_evt.wait(2)
