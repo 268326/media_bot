@@ -83,9 +83,9 @@ def build_wipe_regex(info: dict, has_source: bool) -> re.Pattern | None:
         alts.append(r"DDP[\s.\-_]?[1257]\.[01]|EAC3[\s.\-_]?[1257]\.[01]")
         alts.append(r"DD\+[\s.\-_]?[1257]\.[01]|AC3[\s.\-_]?[1257]\.[01]|DD[\s.\-_]?[1257]\.[01]")
         alts.append(r"TrueHD[\s.\-_]?[1257]\.[01]")
-        alts.append(r"AAC[\s.\-_]?[1257]\.[01]|FLAC[\s.\-_]?[1257]\.[01]|OPUS[\s.\-_]?[1257]\.[01]")
+        alts.append(r"AAC[\s.\-_]?[1257]\.[01]|FLAC[\s.\-_]?[1257]\.[01]|OPUS[\s.\-_]?[1257]\.[01]|PCM(?:_[A-Z0-9]+)?[\s.\-_]?[1257]\.[01]")
         alts.append(r"DTS-HD[\s.\-_]?(?:MA|HRA)?|DTS")
-        alts.append(r"DDP|EAC3|DD\+|AC3|DD|TrueHD|Dolby|AAC|FLAC|OPUS")
+        alts.append(r"DDP|EAC3|DD\+|AC3|DD|TrueHD|Dolby|AAC|FLAC|OPUS|PCM(?:_[A-Z0-9]+)?")
         alts.append(r"[1257]\.[01]")
     if info.get("depth"):
         alts.append(r"(?:8|10|12|14|16)bit")
@@ -229,16 +229,19 @@ def parse_audio(a_stream: dict, fmt: dict) -> str:
     ch_map = {8: "7.1", 6: "5.1", 2: "2.0", 1: "1.0"}
     ch = ch_map.get(ch_n, f"{ch_n}ch")
 
-    base_map = {
-        "EAC3": "DDP",
-        "AC3": "DD",
-        "TRUEHD": "TrueHD",
-        "DTS": "DTS",
-        "AAC": "AAC",
-        "FLAC": "FLAC",
-        "OPUS": "Opus",
-    }
-    base = base_map.get(codec, codec or "")
+    if codec.startswith("PCM"):
+        base = "PCM"
+    else:
+        base_map = {
+            "EAC3": "DDP",
+            "AC3": "DD",
+            "TRUEHD": "TrueHD",
+            "DTS": "DTS",
+            "AAC": "AAC",
+            "FLAC": "FLAC",
+            "OPUS": "Opus",
+        }
+        base = base_map.get(codec, codec or "")
 
     blob = [str(a_stream.get("profile", ""))]
     tags = a_stream.get("tags") or {}
