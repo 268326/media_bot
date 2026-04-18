@@ -206,9 +206,26 @@ class StrmBatchState:
                 item = self.ensure_item(manifest, final_rel_path, source_name=source_name)
             else:
                 manifest["items"][final_rel_path] = item
-            item["source_name"] = source_name
-            item["target_name"] = target_name
-            item["status"] = status
+
+            prev_status = normalize_item_status(item.get("status"))
+            prev_source_name = str(item.get("source_name") or source_name)
+            prev_target_name = str(item.get("target_name") or target_name)
+            preserve_done = (
+                old_rel_path == final_rel_path
+                and prev_status == STATUS_DONE
+                and status == STATUS_ALREADY_OK
+                and prev_target_name
+                and prev_target_name != prev_source_name
+            )
+
+            if preserve_done:
+                item["source_name"] = prev_source_name
+                item["target_name"] = prev_target_name
+                item["status"] = STATUS_DONE
+            else:
+                item["source_name"] = source_name
+                item["target_name"] = target_name
+                item["status"] = status
             item["last_error"] = reason or ""
             item["lease_until"] = 0.0
             item["updated_at"] = now
@@ -265,6 +282,41 @@ class StrmBatchState:
             manifest["status"] = f"{BATCH_STATUS_FAILED}:{reason or UNKNOWN_REASON}"
             manifest["updated_at"] = time.time()
             self.save(folder_key, manifest)
+
+    def folder_report(self, folder_key: str, *, detail_limit: int = 60) -> dict:
+        with self.lock:
+            manifest = self.load(folder_key)
+
+        renamed_count = 0
+        already_ok_count = 0
+        failed_count = 0
+        rename_items: list[tuple[str, str]] = []
+        fail_items: list[tuple[str, str]] = []
+
+        for rel_path, item in sorted((manifest.get("items") or {}).items()):
+            source_name = str((item or {}).get("source_name") or Path(rel_path).name)
+            target_name = str((item or {}).get("target_name") or source_name)
+            status = normalize_item_status((item or {}).get("status"))
+            reason = str((item or {}).get("last_error") or UNKNOWN_REASON)
+
+            if status == STATUS_DONE:
+                renamed_count += 1
+                if len(rename_items) < detail_limit:
+                    rename_items.append((source_name, target_name))
+            elif status == STATUS_ALREADY_OK:
+                already_ok_count += 1
+            elif status in (STATUS_FAILED, STATUS_MISSING):
+                failed_count += 1
+                if len(fail_items) < detail_limit:
+                    fail_items.append((target_name or source_name, reason))
+
+        return {
+            "renamed_count": renamed_count,
+            "already_ok_count": already_ok_count,
+            "failed_count": failed_count,
+            "rename_items": rename_items,
+            "fail_items": fail_items,
+        }
 
     def list_manifests_summary(self) -> list[dict]:
         summaries: list[dict] = []

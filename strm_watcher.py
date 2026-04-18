@@ -333,8 +333,9 @@ class StrmWatcher:
             return
 
         dst = self.done_dir / folder_key
+        report = self.batch_state.folder_report(folder_key)
         moved_to = safe_move(src, dst)
-        strm_count = sum(1 for _ in moved_to.rglob("*.strm"))
+        strm_count = report["renamed_count"] + report["already_ok_count"]
         subtitle_count = sum(1 for _ in moved_to.rglob("*.ass"))
         subtitle_count += sum(1 for _ in moved_to.rglob("*.srt"))
         subtitle_count += sum(1 for _ in moved_to.rglob("*.sup"))
@@ -351,8 +352,21 @@ class StrmWatcher:
             strm_count,
             subtitle_count,
         )
+        logging.info(
+            "📊 STRM 批次 manifest 最终统计\n"
+            "   ├─ 批次:       %s\n"
+            "   ├─ 重命名:     %s\n"
+            "   ├─ 原本已就绪: %s\n"
+            "   ├─ 失败:       %s\n"
+            "   └─ 字幕联动:   %s",
+            folder_key,
+            report["renamed_count"],
+            report["already_ok_count"],
+            report["failed_count"],
+            subtitle_count,
+        )
         self.batch_state.mark_folder_completed(folder_key)
-        strm_notifier.record_folder_completed(folder_key, src, moved_to)
+        strm_notifier.record_folder_completed(folder_key, src, moved_to, state_dir=str(self.state_dir))
 
     def rename_sidecar_subtitles(self, old_strm: Path, new_strm: Path) -> list[Path]:
         """同步重命名同目录下与旧 strm 同基名的字幕文件。"""

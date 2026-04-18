@@ -36,6 +36,11 @@ SA_URL=
 SA_PARENT_ID=
 SA_TOKEN=symedia
 SA_ENABLE_115_PUSH=1
+STRM_PRUNE_ENABLED=0
+STRM_PRUNE_ROOTS=/volume2/strm/share/电影|/volume2/strm/share/电视剧|/volume2/strm/share/动漫
+STRM_PRUNE_NOTIFY_EMBY=1
+STRM_PRUNE_EMBY_URL=http://172.17.0.1:8096
+STRM_PRUNE_EMBY_API_KEY=
 ```
 
 自动签到示例：
@@ -83,6 +88,7 @@ docker logs -f media_bot
 1. 向 Bot 发送资源链接（`https://hdhive.com/resource/<id>`）。
 2. 如果需要解锁，按提示操作。
 3. 成功会返回 115 链接和提取码。
+4. 如需清理空 STRM 目录，发送 `/rm_strm`，先查看预览结果，再点击消息下方“确认删除”按钮执行实际删除。
 
 ## 🆘 常见问题
 

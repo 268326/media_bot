@@ -16,8 +16,9 @@
 - `/strm_status` 查看 STRM 监控服务状态
 - `/strm_scan` 手动触发一次 STRM 存量重扫
 - `/strm_restart` 手动重启 STRM watcher
+- `/rm_strm` 预览 STRM 空目录清理，并在消息按钮中确认/取消实际删除
 - 可选启用 STRM 监控：实时探测、重命名、失败归档、整目录移动到 DONE
-- 可选启用 STRM Telegram 通知：按目录批次/根目录文件聚合推送归档结果
+- 可选启用 STRM Telegram 通知：按目录批次/根目录文件聚合推送归档结果，统计项区分“重命名 / 原本已就绪 / 失败转移”
 
 ## 环境变量
 
@@ -47,6 +48,12 @@
 - `STRM_STATE_DIR`：manifest 批次状态目录，默认 `/app/data/strm_state`
 - `STRM_PROCESSING_LEASE_SECONDS`：processing 租约，默认 `1800`
 - `STRM_STATE_RETENTION_HOURS`：已完成/失败 manifest 自动清理保留期，默认 `168`
+- `STRM_PRUNE_ENABLED`：是否启用 `/rm_strm` 手动空目录清理
+- `STRM_PRUNE_ROOTS`：手动清理扫描根目录列表，使用 `|` 分隔
+- `STRM_PRUNE_ALLOW_DELETE_FIRST_LEVEL` / `STRM_PRUNE_INCLUDE_ROOTS`
+- `STRM_PRUNE_NOTIFY_EMBY`：删除后是否通知 Emby 局部刷新并补做递归刷新
+- `STRM_PRUNE_EMBY_URL` / `STRM_PRUNE_EMBY_API_KEY` / `STRM_PRUNE_EMBY_UPDATE_TYPE`
+- `STRM_PRUNE_HTTP_TIMEOUT` / `STRM_PRUNE_HTTP_RETRIES` / `STRM_PRUNE_HTTP_BACKOFF`
 
 说明：
 
@@ -54,6 +61,7 @@
 - `/points`、`/checkin` 和自动签到依赖 HDHive Premium 权限对应的 Open API
 - `MEDIA_BOT_DEBUG=true` 时会输出 DEBUG 日志，便于排查问题
 - `TGBOT_NOTIFY_CHAT_ID` 配置后，STRM 在归档根目录文件或完成目录批次归档时会发送 Telegram 汇总通知
+- `/rm_strm` 默认只预览；需在 Bot 返回消息下点击“确认删除”按钮才会实际删除
 - STRM 监控依赖系统中的 `ffprobe` 和 `inotifywait`，Dockerfile 已自动安装
 
 ## STRM 监控说明
@@ -75,6 +83,7 @@
 
 已内置以下稳健性优化：
 
+- `/rm_strm` 采用 Telegram 按钮二次确认，避免误删
 - 同一路径去重，避免重复提交
 - manifest 持久化到 `STRM_STATE_DIR`，支持容器重启后恢复批次状态
 - `processing` 条目带租约时间，异常退出后会自动回退到 `pending`

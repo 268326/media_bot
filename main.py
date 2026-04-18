@@ -8,10 +8,18 @@ import os
 import glob
 import sys
 import nest_asyncio
+from dotenv import load_dotenv
+
+DOTENV_PATH = os.getenv("MEDIA_BOT_DOTENV_PATH", "/app/.env")
+load_dotenv(dotenv_path=DOTENV_PATH, override=True)
 
 LOG_PATH = os.getenv("MEDIA_BOT_LOG_PATH", os.getenv("HDHIVE_LOG_PATH", "media_bot.log"))
 MEDIA_BOT_DEBUG = os.getenv("MEDIA_BOT_DEBUG", "false").strip().lower() in ("1", "true", "yes", "on")
 LOG_LEVEL = logging.DEBUG if MEDIA_BOT_DEBUG else logging.INFO
+
+log_dir = os.path.dirname(LOG_PATH)
+if log_dir:
+    os.makedirs(log_dir, exist_ok=True)
 
 # ==================== 首先配置日志 ====================
 # 必须在导入其他模块之前配置，因为其他模块可能会使用 logging

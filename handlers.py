@@ -52,12 +52,16 @@ from formatter import (
     format_start_message
 )
 from strm_service import strm_service
+from strm_prune_service import strm_prune_service
 
 # 创建路由器
 router = Router()
 
 # 待添加到SA的任务字典 {message_id: {"link": str, "task": asyncio.Task, "cancelled": bool}}
 pending_sa_tasks = {}
+# 待确认的 STRM 清理任务 {message_id: {"user_id": int, "created_at": float, "preview_text": str}}
+rm_strm_pending_confirms: dict[int, dict] = {}
+RM_STRM_CONFIRM_TTL = 900
 # 资源网盘类型缓存：resource_id -> website
 resource_website_cache: dict[str, str] = {}
 # 资源列表状态缓存：message_id -> {"resources": list, "media_type": str, "title": str|None}
@@ -239,6 +243,19 @@ async def check_user_permission(message: Message) -> bool:
     return True
 
 
+async def check_callback_permission(callback: CallbackQuery) -> bool:
+    """检查回调操作者是否有权限。"""
+    if ALLOWED_USER_ID == 0:
+        return True
+
+    user_id = callback.from_user.id
+    if user_id != ALLOWED_USER_ID:
+        await callback.answer("⛔️ 权限不足", show_alert=True)
+        logging.warning(f"❌ 用户 {user_id} ({callback.from_user.username}) 尝试点击受限按钮但被拒绝")
+        return False
+    return True
+
+
 # ==================== 命令处理器 ====================
 
 @router.message(Command("start"))
@@ -399,13 +416,59 @@ async def cmd_strm_restart(message: Message):
     await wait_msg.edit_text(f"{prefix} {result.get('message', '未知结果')}", parse_mode="HTML")
 
 
+@router.message(Command("rm_strm"))
+async def cmd_rm_strm(message: Message):
+    if not await check_user_permission(message):
+        return
+
+    now = time.time()
+    expired_keys = [
+        msg_id
+        for msg_id, payload in rm_strm_pending_confirms.items()
+        if now - float(payload.get("created_at") or 0) > RM_STRM_CONFIRM_TTL
+    ]
+    for msg_id in expired_keys:
+        rm_strm_pending_confirms.pop(msg_id, None)
+
+    wait_msg = await message.reply("🧹 正在预览 STRM 空目录清理结果…", parse_mode="HTML")
+    result = await strm_prune_service.run(apply_changes=False)
+    if not result.get("ok"):
+        await wait_msg.edit_text(f"❌ {result.get('message', '未知结果')}", parse_mode="HTML")
+        return
+
+    summary = result.get("summary") or {}
+    preview_text = result.get("message", "")
+    deletable_total = int(summary.get("deletable_total", 0) or 0)
+    if deletable_total <= 0:
+        await wait_msg.edit_text(preview_text, parse_mode="HTML")
+        return
+
+    rm_strm_pending_confirms[wait_msg.message_id] = {
+        "user_id": message.from_user.id,
+        "created_at": time.time(),
+        "preview_text": preview_text,
+    }
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="⚠️ 确认删除", callback_data=f"rm_strm_confirm:{wait_msg.message_id}"),
+            InlineKeyboardButton(text="取消", callback_data=f"rm_strm_cancel:{wait_msg.message_id}"),
+        ]
+    ])
+    confirm_text = (
+        f"{preview_text}\n\n"
+        "<b>确认操作：</b>\n"
+        "• 点击“确认删除”后将按当前 .env 配置实际删除以上空目录\n"
+        "• 点击“取消”则本次仅保留预览结果"
+    )
+    await wait_msg.edit_text(confirm_text, reply_markup=kb, parse_mode="HTML")
+
+
 @router.message(Command("hdc"))
 async def cmd_cancel_sa(message: Message):
     """取消最近一次的自动添加到SA任务"""
     if not await check_user_permission(message):
         return
     
-    # 查找最近的一个未取消的任务
     latest_task = None
     latest_message_id = None
     
@@ -416,7 +479,6 @@ async def cmd_cancel_sa(message: Message):
             break
     
     if latest_task:
-        # 取消任务
         latest_task["cancelled"] = True
         latest_task["task"].cancel()
         
@@ -767,6 +829,75 @@ async def handle_keyword_search(message: Message, keyword: str, search_type: str
 
 
 # ==================== 回调查询处理器 ====================
+
+@router.callback_query(F.data.startswith("rm_strm_confirm:"))
+async def callback_rm_strm_confirm(callback: CallbackQuery):
+    if not await check_callback_permission(callback):
+        return
+
+    msg = callback.message
+    if not msg:
+        await callback.answer()
+        return
+
+    key = (callback.data or "").split(":", 1)[1]
+    if str(msg.message_id) != key:
+        await callback.answer("确认消息不匹配", show_alert=True)
+        return
+
+    pending = rm_strm_pending_confirms.get(msg.message_id)
+    if not pending:
+        await callback.answer("确认已失效，请重新执行 /rm_strm", show_alert=True)
+        return
+
+    if pending.get("user_id") != callback.from_user.id:
+        await callback.answer("只能由发起人确认删除", show_alert=True)
+        return
+
+    created_at = float(pending.get("created_at") or 0)
+    if time.time() - created_at > RM_STRM_CONFIRM_TTL:
+        rm_strm_pending_confirms.pop(msg.message_id, None)
+        await msg.edit_reply_markup(reply_markup=None)
+        await callback.answer("确认已过期，请重新执行 /rm_strm", show_alert=True)
+        return
+
+    await callback.answer("开始删除…")
+    await msg.edit_text("🧹 已确认，正在执行 STRM 空目录实际删除…", parse_mode="HTML")
+    result = await strm_prune_service.run(apply_changes=True)
+    rm_strm_pending_confirms.pop(msg.message_id, None)
+    prefix = "✅" if result.get("ok") else "❌"
+    await msg.edit_text(f"{prefix} {result.get('message', '未知结果')}", parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("rm_strm_cancel:"))
+async def callback_rm_strm_cancel(callback: CallbackQuery):
+    if not await check_callback_permission(callback):
+        return
+
+    msg = callback.message
+    if not msg:
+        await callback.answer()
+        return
+
+    key = (callback.data or "").split(":", 1)[1]
+    if str(msg.message_id) != key:
+        await callback.answer("取消消息不匹配", show_alert=True)
+        return
+
+    pending = rm_strm_pending_confirms.get(msg.message_id)
+    if not pending:
+        await callback.answer("这条确认已失效", show_alert=True)
+        return
+
+    if pending.get("user_id") != callback.from_user.id:
+        await callback.answer("只能由发起人取消", show_alert=True)
+        return
+
+    preview_text = str(pending.get("preview_text") or "🧹 本次仅执行了预览")
+    rm_strm_pending_confirms.pop(msg.message_id, None)
+    await callback.answer("已取消")
+    await msg.edit_text(f"{preview_text}\n\n❎ 已取消实际删除，本次仅保留预览结果。", parse_mode="HTML")
+
 
 @router.callback_query(F.data.startswith("pf:"))
 async def callback_provider_filter(callback: CallbackQuery):

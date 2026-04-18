@@ -7,6 +7,7 @@ import sys
 from dotenv import load_dotenv
 
 from strm_config import StrmSettings
+from strm_prune import load_settings_from_env
 
 # 加载环境变量
 DOTENV_PATH = os.getenv("MEDIA_BOT_DOTENV_PATH", "/app/.env")
@@ -102,6 +103,8 @@ STRM_SETTINGS = StrmSettings(
     only_first_level_dir=STRM_ONLY_FIRST_LEVEL_DIR,
 )
 
+STRM_PRUNE_SETTINGS = load_settings_from_env()
+
 
 def mask_secret(value: str, *, prefix: int = 6) -> str:
     """返回脱敏后的敏感信息，仅展示前几位用于排查配置。"""
@@ -143,7 +146,6 @@ def validate_config():
         warnings.append(
             f"已启用自动签到: cron={CHECKIN_CRON}, timezone={CHECKIN_TIMEZONE}, notify_chat_id={ALLOWED_USER_ID or '未配置'}"
         )
-
     if STRM_WATCH_ENABLED:
         missing = []
         if not STRM_WATCH_DIR:
@@ -162,6 +164,15 @@ def validate_config():
             )
             if TGBOT_NOTIFY_CHAT_ID:
                 warnings.append(f"已启用 STRM Telegram 通知: chat_id={TGBOT_NOTIFY_CHAT_ID}")
+
+    if STRM_PRUNE_SETTINGS.enabled:
+        warnings.append(
+            "已启用 STRM 空目录清理: "
+            f"roots={list(STRM_PRUNE_SETTINGS.roots)}, notify_emby={STRM_PRUNE_SETTINGS.notify_emby}, "
+            f"allow_delete_first_level={STRM_PRUNE_SETTINGS.allow_delete_first_level}"
+        )
+        if STRM_PRUNE_SETTINGS.notify_emby and not STRM_PRUNE_SETTINGS.emby_api_key:
+            warnings.append("STRM 空目录清理已开启 Emby 通知，但未配置 STRM_PRUNE_EMBY_API_KEY/EMBY_API_KEY，运行时将跳过通知。")
     
     # 输出错误和警告
     if errors:
