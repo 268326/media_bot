@@ -11,9 +11,32 @@ import threading
 import time
 from pathlib import Path
 
+from strm_reason import (
+    ACTIVE_ITEM_STATUSES,
+    BATCH_STATUS_ACTIVE,
+    BATCH_STATUS_COMPLETED,
+    BATCH_STATUS_FAILED,
+    BLOCKING_ITEM_STATUSES,
+    DISAPPEARED_BEFORE_COMPLETION,
+    FINAL_ITEM_STATUSES,
+    ITEM_STATUS_ORDER,
+    PROCESSING_LEASE_EXPIRED,
+    STATUS_ALREADY_OK,
+    STATUS_DONE,
+    STATUS_FAILED,
+    STATUS_MISSING,
+    STATUS_PENDING,
+    STATUS_PROCESSING,
+    UNKNOWN_REASON,
+    humanize_batch_status,
+    humanize_reason,
+    make_batch_status,
+    normalize_item_status,
+    split_batch_status,
+)
 
-FINAL_STATES = {"done", "already_ok", "failed"}
-ACTIVE_STATES = {"pending", "processing"}
+
+MANIFEST_VERSION = 1
 
 
 class StrmBatchState:
@@ -31,15 +54,45 @@ class StrmBatchState:
     def _empty_manifest(self, folder_key: str) -> dict:
         now = time.time()
         return {
-            "version": 1,
+            "version": MANIFEST_VERSION,
             "folder_key": folder_key,
-            "status": "active",
+            "status": BATCH_STATUS_ACTIVE,
             "created_at": now,
             "updated_at": now,
             "last_scan_at": 0.0,
             "scan_revision": 0,
             "items": {},
         }
+
+    def _normalize_manifest(self, data: dict, folder_key: str) -> dict:
+        manifest = dict(data or {})
+        now = time.time()
+        manifest["version"] = int(manifest.get("version") or MANIFEST_VERSION)
+        manifest["folder_key"] = str(manifest.get("folder_key") or folder_key)
+        manifest["status"] = make_batch_status(manifest.get("status") or BATCH_STATUS_ACTIVE)
+        manifest.setdefault("created_at", now)
+        manifest.setdefault("updated_at", now)
+        manifest.setdefault("last_scan_at", 0.0)
+        manifest.setdefault("scan_revision", 0)
+
+        raw_items = manifest.get("items") or {}
+        if not isinstance(raw_items, dict):
+            raw_items = {}
+
+        items: dict[str, dict] = {}
+        for rel_path, raw_item in raw_items.items():
+            item = dict(raw_item or {})
+            item["source_name"] = str(item.get("source_name") or Path(rel_path).name)
+            item["target_name"] = str(item.get("target_name") or "")
+            item["status"] = normalize_item_status(item.get("status"))
+            item["last_error"] = str(item.get("last_error") or "")
+            item["updated_at"] = float(item.get("updated_at") or now)
+            item["attempts"] = int(item.get("attempts") or 0)
+            item["lease_until"] = float(item.get("lease_until") or 0.0)
+            item["last_seen_scan_revision"] = int(item.get("last_seen_scan_revision") or 0)
+            items[str(rel_path)] = item
+        manifest["items"] = items
+        return manifest
 
     def load(self, folder_key: str) -> dict:
         path = self.manifest_path(folder_key)
@@ -52,17 +105,7 @@ class StrmBatchState:
             return self._empty_manifest(folder_key)
         if not isinstance(data, dict):
             return self._empty_manifest(folder_key)
-        data.setdefault("version", 1)
-        data.setdefault("folder_key", folder_key)
-        data.setdefault("status", "active")
-        data.setdefault("created_at", time.time())
-        data.setdefault("updated_at", time.time())
-        data.setdefault("last_scan_at", 0.0)
-        data.setdefault("scan_revision", 0)
-        data.setdefault("items", {})
-        if not isinstance(data["items"], dict):
-            data["items"] = {}
-        return data
+        return self._normalize_manifest(data, folder_key)
 
     def save(self, folder_key: str, manifest: dict):
         path = self.manifest_path(folder_key)
@@ -76,7 +119,7 @@ class StrmBatchState:
         now = time.time()
         if item:
             item.setdefault("source_name", source_name or Path(rel_path).name)
-            item.setdefault("status", "pending")
+            item.setdefault("status", STATUS_PENDING)
             item.setdefault("target_name", "")
             item.setdefault("last_error", "")
             item.setdefault("updated_at", now)
@@ -87,7 +130,7 @@ class StrmBatchState:
         item = {
             "source_name": source_name or Path(rel_path).name,
             "target_name": "",
-            "status": "pending",
+            "status": STATUS_PENDING,
             "last_error": "",
             "updated_at": now,
             "attempts": 0,
@@ -116,22 +159,22 @@ class StrmBatchState:
                 item["last_seen_scan_revision"] = current_rev
                 if not existed:
                     new_items += 1
-                if item.get("status") == "processing" and float(item.get("lease_until") or 0) <= now:
-                    item["status"] = "pending"
-                    item["last_error"] = "processing_lease_expired"
+                if item.get("status") == STATUS_PROCESSING and float(item.get("lease_until") or 0) <= now:
+                    item["status"] = STATUS_PENDING
+                    item["last_error"] = PROCESSING_LEASE_EXPIRED
                     item["updated_at"] = now
                     reset_processing += 1
-                if item.get("status") == "missing":
-                    item["status"] = "pending"
+                if item.get("status") == STATUS_MISSING:
+                    item["status"] = STATUS_PENDING
                     item["updated_at"] = now
 
             for rel_path, item in list(manifest["items"].items()):
                 if rel_path in current_set:
                     continue
-                status = str(item.get("status") or "pending")
-                if status in ACTIVE_STATES:
-                    item["status"] = "missing"
-                    item["last_error"] = "disappeared_before_completion"
+                status = str(item.get("status") or STATUS_PENDING)
+                if status in ACTIVE_ITEM_STATUSES:
+                    item["status"] = STATUS_MISSING
+                    item["last_error"] = DISAPPEARED_BEFORE_COMPLETION
                     item["updated_at"] = now
                     missing_active += 1
 
@@ -147,7 +190,7 @@ class StrmBatchState:
         with self.lock:
             manifest = self.load(folder_key)
             item = self.ensure_item(manifest, rel_path, source_name=source_name)
-            item["status"] = "processing"
+            item["status"] = STATUS_PROCESSING
             item["source_name"] = source_name
             item["attempts"] = int(item.get("attempts") or 0) + 1
             item["lease_until"] = time.time() + max(lease_seconds, 30)
@@ -179,7 +222,7 @@ class StrmBatchState:
             rel_path,
             source_name=source_name,
             target_name=target_name,
-            status="failed",
+            status=STATUS_FAILED,
             reason=reason,
         )
 
@@ -188,21 +231,14 @@ class StrmBatchState:
         manifest = rec["manifest"]
         items = manifest.get("items", {})
 
-        counts = {
-            "pending": 0,
-            "processing": 0,
-            "done": 0,
-            "already_ok": 0,
-            "failed": 0,
-            "missing": 0,
-        }
+        counts = {status: 0 for status in ITEM_STATUS_ORDER}
         blockers: list[str] = []
         for rel_path, item in items.items():
-            status = str(item.get("status") or "pending")
+            status = str(item.get("status") or STATUS_PENDING)
             if status not in counts:
                 counts[status] = 0
             counts[status] += 1
-            if status in {"pending", "processing", "missing"}:
+            if status in BLOCKING_ITEM_STATUSES:
                 blockers.append(rel_path)
 
         ready = not blockers and rec["new_items"] == 0 and rec["missing_active"] == 0 and rec["reset_processing"] == 0
@@ -219,14 +255,14 @@ class StrmBatchState:
     def mark_folder_completed(self, folder_key: str):
         with self.lock:
             manifest = self.load(folder_key)
-            manifest["status"] = "completed"
+            manifest["status"] = BATCH_STATUS_COMPLETED
             manifest["updated_at"] = time.time()
             self.save(folder_key, manifest)
 
     def mark_folder_failed(self, folder_key: str, reason: str):
         with self.lock:
             manifest = self.load(folder_key)
-            manifest["status"] = f"failed:{reason or 'unknown'}"
+            manifest["status"] = f"{BATCH_STATUS_FAILED}:{reason or UNKNOWN_REASON}"
             manifest["updated_at"] = time.time()
             self.save(folder_key, manifest)
 
@@ -249,25 +285,19 @@ class StrmBatchState:
                 continue
 
             items = data.get("items") or {}
-            counts: dict[str, int] = {
-                "pending": 0,
-                "processing": 0,
-                "done": 0,
-                "already_ok": 0,
-                "failed": 0,
-                "missing": 0,
-            }
+            counts: dict[str, int] = {status: 0 for status in ITEM_STATUS_ORDER}
             blockers: list[str] = []
             for rel_path, item in items.items():
-                status = str((item or {}).get("status") or "pending")
+                status = str((item or {}).get("status") or STATUS_PENDING)
                 counts[status] = counts.get(status, 0) + 1
-                if status in {"pending", "processing", "missing"}:
+                if status in BLOCKING_ITEM_STATUSES:
                     blockers.append(Path(rel_path).name)
 
             summaries.append(
                 {
                     "folder_key": str(data.get("folder_key") or path.stem),
-                    "status": str(data.get("status") or "active"),
+                    "status": str(data.get("status") or BATCH_STATUS_ACTIVE),
+                    "status_label": humanize_batch_status(data.get("status") or BATCH_STATUS_ACTIVE),
                     "counts": counts,
                     "updated_at": float(data.get("updated_at") or 0),
                     "last_scan_at": float(data.get("last_scan_at") or 0),
@@ -275,7 +305,7 @@ class StrmBatchState:
                 }
             )
 
-        summaries.sort(key=lambda x: (x.get("status") != "active", -float(x.get("updated_at") or 0)))
+        summaries.sort(key=lambda x: (x.get("status") != BATCH_STATUS_ACTIVE, -float(x.get("updated_at") or 0)))
         return summaries
 
     def cleanup_expired_manifests(self, retention_hours: int) -> int:
@@ -288,9 +318,10 @@ class StrmBatchState:
                 data = json.loads(path.read_text(encoding="utf-8"))
             except Exception:
                 continue
-            status = str(data.get("status") or "active")
+            status = str(data.get("status") or BATCH_STATUS_ACTIVE)
+            status_code, _ = split_batch_status(status)
             updated_at = float(data.get("updated_at") or 0)
-            if status == "active":
+            if status_code == BATCH_STATUS_ACTIVE:
                 continue
             if updated_at <= 0 or updated_at > cutoff:
                 continue

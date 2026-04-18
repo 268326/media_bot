@@ -17,8 +17,34 @@ from pathlib import Path
 from strm_batch_state import StrmBatchState
 from strm_config import StrmSettings
 from strm_naming import generate_new_name, parse_media_info
-from strm_probe import read_strm_url, run_ffprobe
 from strm_notifier import strm_notifier
+from strm_probe import read_strm_url, run_ffprobe
+from strm_reason import (
+    BATCH_STATUS_ACTIVE,
+    BLOCKING_ITEM_STATUSES,
+    DISAPPEARED_BEFORE_COMPLETION,
+    FFPROBE_FAILED,
+    INVALID_STRM_URL,
+    MOVE_DONE_FILE_ERROR,
+    MOVE_DONE_FOLDER_ERROR,
+    MOVE_FAILED_STRM_ERROR,
+    NAME_CONFLICT,
+    NOT_A_DIRECTORY,
+    PROCESSING_LEASE_EXPIRED,
+    RENAME_ERROR,
+    SOURCE_MISSING,
+    STATUS_ALREADY_OK,
+    STATUS_DONE,
+    STATUS_FAILED,
+    STATUS_MISSING,
+    STATUS_PENDING,
+    STATUS_PROCESSING,
+    SUBTITLE_MOVE_ERROR,
+    SUBTITLE_RENAME_ERROR,
+    UNKNOWN_REASON,
+    humanize_reason,
+    make_reason,
+)
 
 SUBTITLE_EXTENSIONS = (".ass", ".srt", ".sup")
 
@@ -165,6 +191,8 @@ def safe_move(src: Path, dst: Path) -> Path:
     return dst
 
 
+
+
 @dataclass
 class ProcessOutcome:
     ok: bool
@@ -267,7 +295,7 @@ class StrmWatcher:
                 moved.append(moved_to)
                 logging.info("📎 字幕已移动\n   ├─ 源文件: %s\n   └─ 目标:   %s", src, moved_to)
             except Exception as exc:
-                logging.warning("FAIL subtitle_move_error: %s -> %s (%s)", src, dst, exc)
+                logging.warning("⚠️ 字幕移动失败\n   ├─ 文件:   %s\n   ├─ 目标:   %s\n   └─ 原因:   %s", src, dst, humanize_reason(make_reason(SUBTITLE_MOVE_ERROR, str(exc))))
 
         return moved
 
@@ -294,14 +322,14 @@ class StrmWatcher:
     def move_done_folder(self, folder_key: str) -> None:
         src = self.watch_dir / folder_key
         if not src.exists():
-            logging.warning("⚠️ STRM 目录归档跳过\n   ├─ 目录:   %s\n   └─ 原因:   source_missing", src)
-            self.batch_state.mark_folder_failed(folder_key, "source_missing")
-            strm_notifier.record_folder_failed(folder_key, src, self.done_dir / folder_key, reason="source_missing")
+            logging.warning("⚠️ STRM 目录归档跳过\n   ├─ 目录:   %s\n   └─ 原因:   %s", src, humanize_reason(SOURCE_MISSING))
+            self.batch_state.mark_folder_failed(folder_key, SOURCE_MISSING)
+            strm_notifier.record_folder_failed(folder_key, src, self.done_dir / folder_key, reason=SOURCE_MISSING)
             return
         if not src.is_dir():
-            logging.warning("⚠️ STRM 目录归档跳过\n   ├─ 路径:   %s\n   └─ 原因:   not_a_directory", src)
-            self.batch_state.mark_folder_failed(folder_key, "not_a_directory")
-            strm_notifier.record_folder_failed(folder_key, src, self.done_dir / folder_key, reason="not_a_directory")
+            logging.warning("⚠️ STRM 目录归档跳过\n   ├─ 路径:   %s\n   └─ 原因:   %s", src, humanize_reason(NOT_A_DIRECTORY))
+            self.batch_state.mark_folder_failed(folder_key, NOT_A_DIRECTORY)
+            strm_notifier.record_folder_failed(folder_key, src, self.done_dir / folder_key, reason=NOT_A_DIRECTORY)
             return
 
         dst = self.done_dir / folder_key
@@ -336,7 +364,7 @@ class StrmWatcher:
             suffix_part = src.name[len(old_stem):]
             dst = new_strm.with_name(new_stem + suffix_part)
             if dst.exists():
-                logging.warning("SKIP subtitle_name_conflict: %s -> %s", src, dst)
+                logging.warning("⚠️ 字幕重命名跳过\n   ├─ 文件:   %s\n   ├─ 目标:   %s\n   └─ 原因:   目标文件已存在", src, dst)
                 continue
             try:
                 os.rename(src, dst)
@@ -344,7 +372,7 @@ class StrmWatcher:
                 renamed.append(dst)
                 logging.info("📝 字幕已重命名\n   ├─ 旧名: %s\n   └─ 新名: %s", src.name, dst.name)
             except Exception as exc:
-                logging.warning("FAIL subtitle_rename_error: %s -> %s (%s)", src, dst, exc)
+                logging.warning("⚠️ 字幕重命名失败\n   ├─ 文件:   %s\n   ├─ 目标:   %s\n   └─ 原因:   %s", src, dst, humanize_reason(make_reason(SUBTITLE_RENAME_ERROR, str(exc))))
 
         return renamed
 
@@ -354,13 +382,13 @@ class StrmWatcher:
 
         url = read_strm_url(p)
         if not url:
-            logging.warning("FAIL invalid_strm_url: %s", p)
-            return ProcessOutcome(ok=False, final_path=p, reason="invalid_strm_url")
+            logging.warning("❌ STRM 内容无效\n   ├─ 文件:   %s\n   └─ 原因:   %s", p, humanize_reason(INVALID_STRM_URL))
+            return ProcessOutcome(ok=False, final_path=p, reason=INVALID_STRM_URL)
 
         data = run_ffprobe(url, self.settings)
         if not data:
-            logging.warning("FAIL ffprobe_failed: %s", p)
-            return ProcessOutcome(ok=False, final_path=p, reason="ffprobe_failed")
+            logging.warning("❌ STRM 探测失败\n   ├─ 文件:   %s\n   └─ 原因:   %s", p, humanize_reason(FFPROBE_FAILED))
+            return ProcessOutcome(ok=False, final_path=p, reason=FFPROBE_FAILED)
 
         info = parse_media_info(data)
         new_name = generate_new_name(p.name, info)
@@ -371,14 +399,24 @@ class StrmWatcher:
 
         dst = p.parent / new_name
         if dst.exists():
-            logging.warning("FAIL name_conflict: %s -> %s", p, dst)
-            return ProcessOutcome(ok=False, final_path=p, reason="name_conflict")
+            logging.warning("❌ STRM 重命名冲突\n   ├─ 源文件: %s\n   ├─ 目标:   %s\n   └─ 原因:   %s", p, dst, humanize_reason(NAME_CONFLICT))
+            return ProcessOutcome(ok=False, final_path=p, reason=NAME_CONFLICT)
 
         try:
             os.rename(p, dst)
             self.coord.mark_alias_inflight(dst)
             subtitle_aliases = self.rename_sidecar_subtitles(p, dst)
-            logging.info("🎬 STRM 已重命名\n   ├─ 旧名: %s\n   ├─ 新名: %s\n   └─ 字幕: %s", p.name, new_name, len(subtitle_aliases))
+            logging.info(
+                "🎬 STRM 已重命名\n"
+                "   ├─ 源文件: %s\n"
+                "   ├─ 结果:   %s\n"
+                "   ├─ 路径:   %s\n"
+                "   └─ 字幕:   %s",
+                p.name,
+                new_name,
+                dst,
+                len(subtitle_aliases),
+            )
             return ProcessOutcome(
                 ok=True,
                 final_path=dst,
@@ -386,8 +424,9 @@ class StrmWatcher:
                 renamed=True,
             )
         except Exception as exc:
-            logging.warning("FAIL rename_error: %s (%s)", p, exc)
-            return ProcessOutcome(ok=False, final_path=p, reason=f"rename_error: {exc}")
+            reason = make_reason(RENAME_ERROR, str(exc))
+            logging.warning("❌ STRM 重命名失败\n   ├─ 文件:   %s\n   └─ 原因:   %s", p, humanize_reason(reason))
+            return ProcessOutcome(ok=False, final_path=p, reason=reason)
 
     def submit_one(self, p: Path, folder_key: str | None) -> bool:
         if not self.executor:
@@ -445,7 +484,7 @@ class StrmWatcher:
                             final_rel_path,
                             source_name=p.name,
                             target_name=(final_path.name if final_path else p.name),
-                            status=("already_ok" if already_ok else "done"),
+                            status=(STATUS_ALREADY_OK if already_ok else STATUS_DONE),
                             reason=reason,
                         )
                     else:
@@ -454,7 +493,7 @@ class StrmWatcher:
                             rel_path,
                             source_name=p.name,
                             target_name=(final_path.name if final_path else p.name),
-                            reason=reason or "unknown",
+                            reason=reason or UNKNOWN_REASON,
                         )
 
                 if ok and folder_key is None and final_path and final_path.exists():
@@ -470,7 +509,7 @@ class StrmWatcher:
                             )
                         final_move_paths.extend(moved_subtitles)
                     except Exception as exc:
-                        reason = f"move_done_file_error: {exc}"
+                        reason = make_reason(MOVE_DONE_FILE_ERROR, str(exc))
                         logging.warning(
                             "❌ STRM 单文件归档失败\n"
                             "   ├─ 文件:   %s\n"
@@ -478,7 +517,7 @@ class StrmWatcher:
                             "   └─ 原因:   %s",
                             final_path,
                             self.done_dir / final_path.name,
-                            exc,
+                            humanize_reason(reason),
                         )
                         strm_notifier.record_root_completed(
                             final_path,
@@ -501,7 +540,7 @@ class StrmWatcher:
                             )
                         final_move_paths.extend(moved_subtitles)
                     except Exception as exc:
-                        move_reason = f"move_failed_strm_error: {exc}"
+                        move_reason = make_reason(MOVE_FAILED_STRM_ERROR, str(exc))
                         failed_src = final_path or p
                         logging.warning(
                             "❌ STRM 失败文件转移失败\n"
@@ -510,7 +549,7 @@ class StrmWatcher:
                             "   └─ 原因:   %s",
                             failed_src,
                             self.failed_dir / failed_src.relative_to(self.watch_dir),
-                            exc,
+                            humanize_reason(move_reason),
                         )
                         strm_notifier.record_root_completed(
                             failed_src,
@@ -556,22 +595,16 @@ class StrmWatcher:
                         logging.info(
                             "⏳ STRM 批次暂不归档\n"
                             "   ├─ 批次:   %s\n"
-                            "   ├─ pending:   %s\n"
-                            "   ├─ processing:%s\n"
-                            "   ├─ done:      %s\n"
-                            "   ├─ already_ok:%s\n"
-                            "   ├─ failed:    %s\n"
-                            "   ├─ missing:   %s\n"
-                            "   ├─ new_items: %s\n"
-                            "   ├─ reset_proc:%s\n"
-                            "   └─ 示例:      %s",
+                            "   ├─ 统计:   pending=%s, processing=%s, done=%s, already_ok=%s, failed=%s, missing=%s\n"
+                            "   ├─ 变化:   new_items=%s, reset_processing=%s\n"
+                            "   └─ 样本:   %s",
                             st.rel_folder,
-                            decision["counts"].get("pending", 0),
-                            decision["counts"].get("processing", 0),
-                            decision["counts"].get("done", 0),
-                            decision["counts"].get("already_ok", 0),
-                            decision["counts"].get("failed", 0),
-                            decision["counts"].get("missing", 0),
+                            decision["counts"].get(STATUS_PENDING, 0),
+                            decision["counts"].get(STATUS_PROCESSING, 0),
+                            decision["counts"].get(STATUS_DONE, 0),
+                            decision["counts"].get(STATUS_ALREADY_OK, 0),
+                            decision["counts"].get(STATUS_FAILED, 0),
+                            decision["counts"].get(STATUS_MISSING, 0),
                             decision.get("new_items", 0),
                             decision.get("reset_processing", 0),
                             ", ".join(decision.get("samples") or []) or "-",
@@ -584,7 +617,7 @@ class StrmWatcher:
                     except Exception as exc:
                         src = self.watch_dir / st.rel_folder
                         dst = self.done_dir / st.rel_folder
-                        reason = f"move_done_folder_error: {exc}"
+                        reason = make_reason(MOVE_DONE_FOLDER_ERROR, str(exc))
                         logging.warning(
                             "❌ STRM 目录归档失败\n"
                             "   ├─ 批次:   %s\n"
@@ -594,7 +627,7 @@ class StrmWatcher:
                             st.rel_folder,
                             src,
                             dst,
-                            exc,
+                            humanize_reason(reason),
                         )
                         self.batch_state.mark_folder_failed(st.rel_folder, reason)
                         strm_notifier.record_folder_failed(st.rel_folder, src, dst, reason=reason)
@@ -604,12 +637,12 @@ class StrmWatcher:
 
     def batch_status(self) -> dict:
         summaries = self.batch_state.list_manifests_summary()
-        active = [item for item in summaries if str(item.get("status") or "") == "active"]
+        active = [item for item in summaries if str(item.get("status") or "") == BATCH_STATUS_ACTIVE]
         blocked = [
             item for item in active
-            if item.get("counts", {}).get("pending", 0)
-            or item.get("counts", {}).get("processing", 0)
-            or item.get("counts", {}).get("missing", 0)
+            if item.get("counts", {}).get(STATUS_PENDING, 0)
+            or item.get("counts", {}).get(STATUS_PROCESSING, 0)
+            or item.get("counts", {}).get(STATUS_MISSING, 0)
         ]
         return {
             "state_dir": str(self.state_dir),

@@ -13,6 +13,7 @@ from aiogram.types import Message
 
 from config import ALLOWED_USER_ID
 from formatter import format_error_message
+from strm_reason import BATCH_STATUS_ACTIVE, STATUS_ALREADY_OK, STATUS_DONE, STATUS_FAILED, STATUS_MISSING, STATUS_PENDING, STATUS_PROCESSING
 from strm_service import strm_service
 
 router = Router()
@@ -29,19 +30,20 @@ def format_ts(ts: float | int | None) -> str:
 
 def render_batch_lines(batch: dict) -> list[str]:
     counts = batch.get("counts") or {}
-    status = str(batch.get("status") or "active")
+    status = str(batch.get("status") or BATCH_STATUS_ACTIVE)
+    status_label = str(batch.get("status_label") or status)
     folder_key = html.escape(str(batch.get("folder_key") or "-"))
     lines = [
         f"• <code>{folder_key}</code>",
-        f"  状态: <b>{html.escape(status)}</b>",
+        f"  状态: <b>{html.escape(status_label)}</b>",
         (
             "  统计: "
-            f"P<b>{counts.get('pending', 0)}</b> / "
-            f"R<b>{counts.get('processing', 0)}</b> / "
-            f"D<b>{counts.get('done', 0)}</b> / "
-            f"OK<b>{counts.get('already_ok', 0)}</b> / "
-            f"F<b>{counts.get('failed', 0)}</b> / "
-            f"M<b>{counts.get('missing', 0)}</b>"
+            f"P<b>{counts.get(STATUS_PENDING, 0)}</b> / "
+            f"R<b>{counts.get(STATUS_PROCESSING, 0)}</b> / "
+            f"D<b>{counts.get(STATUS_DONE, 0)}</b> / "
+            f"OK<b>{counts.get(STATUS_ALREADY_OK, 0)}</b> / "
+            f"F<b>{counts.get(STATUS_FAILED, 0)}</b> / "
+            f"M<b>{counts.get(STATUS_MISSING, 0)}</b>"
         ),
         f"  扫描: <code>{html.escape(format_ts(batch.get('last_scan_at')))}</code>",
         f"  更新: <code>{html.escape(format_ts(batch.get('updated_at')))}</code>",

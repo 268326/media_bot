@@ -13,6 +13,7 @@ from pathlib import Path
 from aiogram import Bot
 
 from config import TGBOT_NOTIFY_CHAT_ID
+from strm_reason import UNKNOWN_REASON, humanize_reason
 
 FLUSH_INTERVAL_S = 12
 BULK_TRIGGER_COUNT = 6
@@ -22,6 +23,7 @@ OVERVIEW_LIMIT = 6
 MAX_CAPTURED_DETAILS = 60
 SECTION_DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━"
 PATH_PREVIEW_LEN = 96
+
 
 
 @dataclass
@@ -163,7 +165,7 @@ class StrmNotifier:
                         self._capture_detail(report.rename_items, source_name, target_name)
                 else:
                     report.failed_count += 1
-                    self._capture_detail(report.fail_items, source_name, reason or "unknown")
+                    self._capture_detail(report.fail_items, source_name, reason or UNKNOWN_REASON)
             else:
                 self.root_pending[str(current_path)] = RootPendingEvent(
                     source_name=source_name,
@@ -209,7 +211,7 @@ class StrmNotifier:
                     failed_count=report.failed_count,
                     rename_items=report.rename_items[:],
                     fail_items=report.fail_items[:],
-                    reason=reason or "unknown",
+                    reason=reason or UNKNOWN_REASON,
                 )
             )
         self._trigger_flush(urgent=True)
@@ -284,6 +286,26 @@ class StrmNotifier:
             except Exception as exc:
                 logging.error("❌ STRM 通知发送失败: %s", exc)
 
+    def _short_reason(self, reason: str) -> str:
+        return humanize_reason(reason)
+
+    def _format_counts_line(self, *, renamed: int, subtitle: int, already_ok: int, failed: int) -> str:
+        return (
+            f"🎬<b>{renamed}</b> / "
+            f"📎<b>{subtitle}</b> / "
+            f"⏭️<b>{already_ok}</b> / "
+            f"❌<b>{failed}</b>"
+        )
+
+    def _build_reason_section(self, title: str, reason: str) -> str:
+        text = self._short_reason(reason)
+        if not text:
+            return ""
+        return self._blockquote([f"{title}: {html.escape(text)}"])
+
+    def _build_meta_block(self, lines: list[str]) -> str:
+        return self._blockquote(lines)
+
     def _build_message(self, title: str, sections: list[str]) -> str:
         parts = [title, SECTION_DIVIDER]
         parts.extend(section for section in sections if section)
@@ -342,11 +364,9 @@ class StrmNotifier:
             status_icon = "✅" if event.ok else "❌"
             lines.append(f"{idx}. {status_icon} <code>{html.escape(event.folder_key)}</code>")
             lines.append(f"   📂 <code>{html.escape(self._short_path(event.dst))}</code>")
-            lines.append(
-                f"   📊 🎬<b>{event.renamed_count}</b> / 📎<b>{event.subtitle_count}</b> / ⏭️<b>{event.already_ok_count}</b> / ❌<b>{event.failed_count}</b>"
-            )
+            lines.append(f"   📊 {self._format_counts_line(renamed=event.renamed_count, subtitle=event.subtitle_count, already_ok=event.already_ok_count, failed=event.failed_count)}")
             if not event.ok and event.reason:
-                lines.append(f"   原因: {html.escape(event.reason)}")
+                lines.append(f"   原因: {html.escape(self._short_reason(event.reason))}")
 
         hidden = len(events) - limit
         if hidden > 0:
@@ -377,7 +397,7 @@ class StrmNotifier:
             lines.append(f"   📂 {path_label}: <code>{html.escape(self._short_path(event.dst))}</code>")
 
             if not event.ok:
-                lines.append(f"   原因: {html.escape(event.reason or 'unknown')}")
+                lines.append(f"   原因: {html.escape(self._short_reason(event.reason or UNKNOWN_REASON))}")
 
         hidden = len(events) - limit
         if hidden > 0:
@@ -391,22 +411,18 @@ class StrmNotifier:
             title = "📦 <b>STRM 批次已归档</b>" if event.ok else "❌ <b>STRM 批次归档失败</b>"
             summary_lines = [
                 f"批次目录: <code>{html.escape(event.folder_key)}</code>",
-                f"源目录: <code>{html.escape(event.src)}</code>",
-                f"目标目录: <code>{html.escape(event.dst)}</code>",
+                f"源目录: <code>{html.escape(self._short_path(event.src))}</code>",
+                f"目标目录: <code>{html.escape(self._short_path(event.dst))}</code>",
             ]
-            if not event.ok and event.reason:
-                summary_lines.append(f"失败原因: {html.escape(event.reason)}")
 
             stats_lines = [
-                f"🎬 重命名: <b>{event.renamed_count}</b>",
-                f"📎 字幕联动: <b>{event.subtitle_count}</b>",
-                f"⏭️ 已就绪: <b>{event.already_ok_count}</b>",
-                f"❌ 失败转移: <b>{event.failed_count}</b>",
+                f"统计: {self._format_counts_line(renamed=event.renamed_count, subtitle=event.subtitle_count, already_ok=event.already_ok_count, failed=event.failed_count)}",
             ]
 
             sections = [
-                self._blockquote(summary_lines),
-                f"📊 <b>处理统计</b>\n{self._blockquote(stats_lines)}",
+                self._build_meta_block(summary_lines),
+                self._build_meta_block(stats_lines),
+                self._build_reason_section("失败原因", event.reason) if not event.ok else "",
                 self._format_pair_section(
                     title_icon="📝",
                     title_text="重命名",
@@ -417,7 +433,7 @@ class StrmNotifier:
                 self._format_pair_section(
                     title_icon="❌",
                     title_text="失败",
-                    items=event.fail_items,
+                    items=[(name, self._short_reason(reason)) for name, reason in event.fail_items],
                     total=event.failed_count,
                     right_as_code=False,
                 ),
@@ -433,14 +449,11 @@ class StrmNotifier:
 
         title = "📦 <b>STRM 批次处理汇总</b>" if failed_dirs else "📦 <b>STRM 批次归档汇总</b>"
         sections = [
-            self._blockquote(
+            self._build_meta_block(
                 [
                     f"✅ 归档成功目录: <b>{success_dirs}</b>",
                     f"❌ 归档失败目录: <b>{failed_dirs}</b>",
-                    f"🎬 重命名: <b>{total_renamed}</b>",
-                    f"📎 字幕联动: <b>{total_subtitles}</b>",
-                    f"⏭️ 已就绪: <b>{total_already_ok}</b>",
-                    f"❌ 失败转移: <b>{total_failed}</b>",
+                    f"📊 统计: {self._format_counts_line(renamed=total_renamed, subtitle=total_subtitles, already_ok=total_already_ok, failed=total_failed)}",
                 ]
             ),
             self._format_folder_overview(events),
@@ -454,7 +467,7 @@ class StrmNotifier:
             info_lines = [
                 f"源文件: <code>{html.escape(event.source_name)}</code>",
                 f"结果文件: <code>{html.escape(event.target_name)}</code>",
-                f"{'归档路径' if event.ok else '当前路径'}: <code>{html.escape(event.dst)}</code>",
+                f"{'归档路径' if event.ok else '当前路径'}: <code>{html.escape(self._short_path(event.dst))}</code>",
             ]
 
             status_lines = [f"📎 字幕联动: <b>{event.subtitle_count}</b>"]
@@ -464,11 +477,10 @@ class StrmNotifier:
                 status_lines.append("⏭️ 原文件已符合命名规则")
 
             sections = [
-                self._blockquote(info_lines),
-                self._blockquote(status_lines),
+                self._build_meta_block(info_lines),
+                self._build_meta_block(status_lines),
+                self._build_reason_section("失败原因", event.reason) if event.reason else "",
             ]
-            if event.reason:
-                sections.append(self._blockquote([f"失败原因: {html.escape(event.reason)}"]))
             return [self._build_message(title, sections)]
 
         ok_events = [event for event in events if event.ok]
@@ -477,7 +489,7 @@ class StrmNotifier:
 
         title = "📨 <b>STRM 单文件处理汇总</b>" if fail_events else "📨 <b>STRM 单文件归档汇总</b>"
         sections = [
-            self._blockquote(
+            self._build_meta_block(
                 [
                     f"✅ 成功归档: <b>{len(ok_events)}</b>",
                     f"❌ 失败转移: <b>{len(fail_events)}</b>",
