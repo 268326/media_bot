@@ -7,6 +7,7 @@ from hdhive_http_api import (  # type: ignore
     search_resources,
     get_resources_by_tmdb_id,
     fetch_download_link,
+    unlock_resource,
     unlock_and_fetch,
     get_user_points,
 )

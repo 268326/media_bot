@@ -13,6 +13,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import IO
 
 from strm_batch_state import StrmBatchState
 from strm_config import StrmSettings
@@ -216,6 +217,9 @@ class StrmWatcher:
         self.executor: ThreadPoolExecutor | None = None
         self.finalizer_thread: threading.Thread | None = None
         self.watcher_thread: threading.Thread | None = None
+        self.inotify_proc: subprocess.Popen | None = None
+        self.inotify_stdout: IO[str] | None = None
+        self.inotify_stderr: IO[str] | None = None
 
     def is_running(self) -> bool:
         watcher_alive = bool(self.watcher_thread and self.watcher_thread.is_alive())
@@ -680,6 +684,9 @@ class StrmWatcher:
         logging.info("Starting inotify: %s", " ".join(cmd))
 
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.inotify_proc = proc
+        self.inotify_stdout = proc.stdout
+        self.inotify_stderr = proc.stderr
 
         def _stderr_drain():
             assert proc.stderr is not None
@@ -691,23 +698,28 @@ class StrmWatcher:
         t = threading.Thread(target=_stderr_drain, daemon=True)
         t.start()
 
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            if self.stop_evt.is_set():
-                proc.terminate()
-                break
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                if self.stop_evt.is_set():
+                    proc.terminate()
+                    break
 
-            path_s = line.strip()
-            if not path_s.endswith(".strm"):
-                continue
+                path_s = line.strip()
+                if not path_s.endswith(".strm"):
+                    continue
 
-            fp = Path(path_s)
-            folder_key = self.coord.folder_key_for(fp)
-            if folder_key is not None:
-                self.reconcile_folder_manifest(folder_key)
-            self.submit_one(fp, folder_key)
+                fp = Path(path_s)
+                folder_key = self.coord.folder_key_for(fp)
+                if folder_key is not None:
+                    self.reconcile_folder_manifest(folder_key)
+                self.submit_one(fp, folder_key)
 
-        return proc.wait()
+            return proc.wait()
+        finally:
+            self.inotify_proc = None
+            self.inotify_stdout = None
+            self.inotify_stderr = None
 
     def watch_loop(self):
         backoff_s = 2
@@ -738,6 +750,33 @@ class StrmWatcher:
 
     def stop(self):
         self.stop_evt.set()
+
+        proc = self.inotify_proc
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+        stream = self.inotify_stdout
+        if stream:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+        err_stream = self.inotify_stderr
+        if err_stream:
+            try:
+                err_stream.close()
+            except Exception:
+                pass
+
+        if self.watcher_thread and self.watcher_thread.is_alive():
+            self.watcher_thread.join(timeout=5)
+        if self.finalizer_thread and self.finalizer_thread.is_alive():
+            self.finalizer_thread.join(timeout=5)
+
         if self.executor:
             self.executor.shutdown(wait=False, cancel_futures=False)
             self.executor = None

@@ -49,6 +49,7 @@ from session_manager import session_manager
 from checkin_scheduler import checkin_scheduler
 from strm_service import strm_service
 from strm_notifier import strm_notifier
+from hdhive_unlock_service import hdhive_unlock_service
 
 
 async def main():
@@ -73,6 +74,9 @@ async def main():
 
     await strm_notifier.start(bot)
 
+    # 启动 HDHive 解锁队列服务
+    await hdhive_unlock_service.start()
+
     # 启动会话管理器
     await session_manager.start()
     logging.info("✅ 会话管理器已启动")
@@ -96,6 +100,9 @@ async def main():
 
         # 停止 STRM 通知器
         await strm_notifier.stop()
+
+        # 停止 HDHive 解锁队列服务
+        await hdhive_unlock_service.stop()
 
         # 停止会话管理器
         await session_manager.stop()

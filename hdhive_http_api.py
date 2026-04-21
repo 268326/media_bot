@@ -8,6 +8,7 @@ import logging
 from typing import Any
 
 from hdhive_auth import OpenAPIError, build_authenticated_session, request_open_api_json
+from hdhive_unlock_service import UnlockWaitCallback, hdhive_unlock_service
 
 logger = logging.getLogger(__name__)
 
@@ -65,17 +66,22 @@ def _request_share_detail(session, resource_id: str) -> dict[str, Any]:
     return data
 
 
-def _request_unlock(session, resource_id: str) -> dict[str, Any]:
-    payload = request_open_api_json(
-        session,
-        "POST",
-        "/resources/unlock",
-        json={"slug": resource_id},
+def _sync_get_share_detail(resource_id: str) -> dict[str, Any]:
+    with build_authenticated_session() as session:
+        return _request_share_detail(session, resource_id)
+
+
+async def unlock_resource(
+    resource_id: str,
+    *,
+    user_id: int | None = None,
+    wait_callback: UnlockWaitCallback | None = None,
+) -> dict[str, Any]:
+    return await hdhive_unlock_service.unlock(
+        resource_id,
+        user_id=user_id,
+        wait_callback=wait_callback,
     )
-    data = payload.get("data") or {}
-    if not isinstance(data, dict):
-        raise RuntimeError("解锁接口返回异常")
-    return data
 
 
 def _sync_get_resources_by_tmdb_id(tmdb_id: str, media_type: str) -> list[dict[str, Any]]:
@@ -91,54 +97,6 @@ def _sync_search_resources(keyword: str, search_type: str = "all") -> list[dict[
     _ = (keyword, search_type)
     logger.info("HDHive Open API 未提供关键词搜索接口，返回空结果并交由 TMDB 兜底")
     return []
-
-
-def _sync_fetch_download_link(resource_id: str) -> dict[str, Any] | None:
-    with build_authenticated_session() as session:
-        try:
-            detail = _request_share_detail(session, resource_id)
-        except OpenAPIError as exc:
-            if exc.status_code == 404:
-                return None
-            raise
-
-        website = str(detail.get("pan_type") or "").strip()
-        actual_points = _to_int(detail.get("actual_unlock_points"), -1)
-        if actual_points < 0:
-            actual_points = _to_int(detail.get("unlock_points"), 0)
-
-        if actual_points > 0 and not bool(detail.get("is_free_for_user")):
-            return {
-                "need_unlock": True,
-                "points": actual_points,
-                "message": str(detail.get("unlock_message") or ""),
-                "website": website,
-            }
-
-        result = _request_unlock(session, resource_id)
-        link = str(result.get("full_url") or result.get("url") or "").strip()
-        if not link:
-            return None
-        return {
-            "link": link,
-            "code": result.get("access_code") or "无",
-            "website": website,
-            "need_unlock": False,
-        }
-
-
-def _sync_unlock_and_fetch(resource_id: str) -> dict[str, Any] | None:
-    with build_authenticated_session() as session:
-        detail = _request_share_detail(session, resource_id)
-        result = _request_unlock(session, resource_id)
-        link = str(result.get("full_url") or result.get("url") or "").strip()
-        if not link:
-            return None
-        return {
-            "link": link,
-            "code": result.get("access_code") or "无",
-            "website": str(detail.get("pan_type") or "").strip(),
-        }
 
 
 def _sync_get_user_points() -> int | None:
@@ -168,12 +126,50 @@ async def fetch_download_link(
     start_url: str | None = None,
 ) -> dict | None:
     _ = (user_id, keep_session, start_url)
-    return await asyncio.to_thread(_sync_fetch_download_link, resource_id)
+
+    try:
+        detail = await asyncio.to_thread(_sync_get_share_detail, resource_id)
+    except OpenAPIError as exc:
+        if exc.status_code == 404:
+            return None
+        raise
+
+    website = str(detail.get("pan_type") or "").strip()
+    actual_points = _to_int(detail.get("actual_unlock_points"), -1)
+    if actual_points < 0:
+        actual_points = _to_int(detail.get("unlock_points"), 0)
+
+    if actual_points > 0 and not bool(detail.get("is_free_for_user")):
+        return {
+            "need_unlock": True,
+            "points": actual_points,
+            "message": str(detail.get("unlock_message") or ""),
+            "website": website,
+        }
+
+    return {
+        "need_unlock": False,
+        "website": website,
+        "resource_id": resource_id,
+        "already_unlocked": bool(detail.get("is_unlocked") or detail.get("is_free_for_user")),
+    }
 
 
-async def unlock_and_fetch(resource_id: str, user_id: int = None) -> dict | None:
-    _ = user_id
-    return await asyncio.to_thread(_sync_unlock_and_fetch, resource_id)
+async def unlock_and_fetch(
+    resource_id: str,
+    user_id: int = None,
+    wait_callback: UnlockWaitCallback | None = None,
+) -> dict | None:
+    detail = await asyncio.to_thread(_sync_get_share_detail, resource_id)
+    result = await unlock_resource(resource_id, user_id=user_id, wait_callback=wait_callback)
+    link = str(result.get("full_url") or result.get("url") or "").strip()
+    if not link:
+        return None
+    return {
+        "link": link,
+        "code": result.get("access_code") or "无",
+        "website": str(detail.get("pan_type") or "").strip(),
+    }
 
 
 async def get_user_points() -> int | None:

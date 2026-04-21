@@ -36,9 +36,11 @@ from utils import parse_hdhive_link, detect_share_provider, is_115_share_link, d
 from hdhive_client import (
     get_resources_by_tmdb_id,
     fetch_download_link, 
+    unlock_resource,
     unlock_and_fetch,
     get_user_points
 )
+from hdhive_unlock_service import UnlockQueueNotice
 from session_manager import session_manager
 from tmdb_api import search_tmdb, get_tmdb_details
 from formatter import (
@@ -57,17 +59,20 @@ from strm_prune_service import strm_prune_service
 # 创建路由器
 router = Router()
 
-# 待添加到SA的任务字典 {message_id: {"link": str, "task": asyncio.Task, "cancelled": bool}}
-pending_sa_tasks = {}
-# 待确认的 STRM 清理任务 {message_id: {"user_id": int, "created_at": float, "preview_text": str}}
-rm_strm_pending_confirms: dict[int, dict] = {}
+# 待添加到SA的任务字典 {"chat_id:message_id": {"link": str, "task": asyncio.Task, "cancelled": bool, "user_id": int|None, "created_at": float}}
+pending_sa_tasks: dict[str, dict] = {}
+# 待确认的 STRM 清理任务 {"chat_id:message_id": {"user_id": int, "created_at": float, "preview_text": str}}
+rm_strm_pending_confirms: dict[str, dict] = {}
 RM_STRM_CONFIRM_TTL = 900
+RESOURCE_WEBSITE_CACHE_LIMIT = 2048
+RESOURCE_LIST_STATE_LIMIT = 256
+TMDB_SEARCH_STATE_LIMIT = 256
 # 资源网盘类型缓存：resource_id -> website
 resource_website_cache: dict[str, str] = {}
-# 资源列表状态缓存：message_id -> {"resources": list, "media_type": str, "title": str|None}
-resource_list_state: dict[int, dict] = {}
-# TMDB 候选列表状态缓存：message_id -> {"results": list[dict], "page": int}
-tmdb_search_state: dict[int, dict] = {}
+# 资源列表状态缓存："chat_id:message_id" -> {"resources": list, "media_type": str, "title": str|None}
+resource_list_state: dict[str, dict] = {}
+# TMDB 候选列表状态缓存："chat_id:message_id" -> {"results": list[dict], "page": int}
+tmdb_search_state: dict[str, dict] = {}
 
 TMDB_PAGE_SIZE = 5
 
@@ -126,6 +131,33 @@ def build_tmdb_candidate_message(results: list[dict], page: int = 0) -> tuple[st
     return result_text, InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
 
 
+def trim_dict_cache(cache: dict, limit: int) -> None:
+    while len(cache) > limit:
+        oldest_key = next(iter(cache))
+        cache.pop(oldest_key, None)
+
+
+def make_message_state_key(message: Message | None) -> str | None:
+    if not message:
+        return None
+    chat = getattr(message, "chat", None)
+    if not chat:
+        return None
+    return f"{chat.id}:{message.message_id}"
+
+
+def format_duration_compact(seconds: float) -> str:
+    """把秒数格式化为适合 TG 提示的紧凑文本。"""
+    total = max(0, int(round(seconds)))
+    minutes, sec = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours > 0:
+        return f"{hours}小时{minutes}分{sec}秒"
+    if minutes > 0:
+        return f"{minutes}分{sec}秒"
+    return f"{sec}秒"
+
+
 async def notify_auto_unlock_failed(target_msg: Message, fallback_msg: Message):
     """通知自动解锁失败（必要时回退发送新消息）"""
     try:
@@ -134,12 +166,228 @@ async def notify_auto_unlock_failed(target_msg: Message, fallback_msg: Message):
         await fallback_msg.reply("❌ 自动解锁失败，请稍后重试", parse_mode="HTML")
 
 
+async def update_unlock_queue_notice(
+    wait_msg: Message,
+    notice: UnlockQueueNotice,
+    *,
+    auto_unlock: bool,
+    title: str | None = None,
+    tip: str | None = None,
+):
+    """在 Telegram 消息中展示解锁排队/限速等待状态。"""
+    mode_text = title or ("自动解锁排队中" if auto_unlock else "解锁排队中")
+    footer_tip = tip or "💡 已触发 HDHive API 解锁限速，正在排队等待"
+    ahead_text = (
+        f"前面还有 <code>{notice.ahead_count}</code> 个请求"
+        if notice.ahead_count > 0
+        else "你已在队列最前面，等待下一个可用速率窗口"
+    )
+    queued_text = format_duration_compact(notice.queued_seconds)
+    wait_text = format_duration_compact(notice.wait_seconds)
+    try:
+        await wait_msg.edit_text(
+            f"⏳ <b>{mode_text}...</b>\n\n"
+            f"🆔 <code>{notice.resource_id}</code>\n"
+            f"📍 当前队列位置: <code>{notice.queue_position}</code>\n"
+            f"👥 {ahead_text}\n"
+            f"⌛ 已累计等待: <code>{queued_text}</code>\n"
+            f"⏱️ 预计至少还要等: <code>{wait_text}</code>\n"
+            f"🚦 限速: <code>{notice.rate_limit_per_second}</code> 次/秒\n\n"
+            f"{footer_tip}",
+            parse_mode="HTML",
+        )
+    except Exception as exc:
+        logging.debug("更新解锁排队提示失败: %s", exc)
+
+
+def build_unlock_wait_callback(
+    wait_msg: Message,
+    *,
+    auto_unlock: bool,
+    title: str | None = None,
+    tip: str | None = None,
+):
+    async def _wait_callback(notice: UnlockQueueNotice):
+        await update_unlock_queue_notice(
+            wait_msg,
+            notice,
+            auto_unlock=auto_unlock,
+            title=title,
+            tip=tip,
+        )
+
+    return _wait_callback
+
+
+async def perform_unlock_and_handle_result(
+    *,
+    wait_msg: Message,
+    fallback_msg: Message,
+    resource_id: str,
+    user_id: int,
+    auto_unlock: bool,
+    website: str,
+) -> bool:
+    """统一执行解锁并处理结果展示。"""
+    if auto_unlock:
+        await wait_msg.edit_text(
+            f"🤖 <b>自动解锁中...</b>\n\n"
+            f"🆔 <code>{resource_id}</code>\n"
+            f"💡 请求已提交到解锁队列",
+            parse_mode="HTML"
+        )
+    else:
+        await wait_msg.edit_text(
+            f"🔓 <b>正在解锁资源...</b>\n\n"
+            f"🆔 <code>{resource_id}</code>\n"
+            f"💡 请求已提交到解锁队列",
+            parse_mode="HTML"
+        )
+
+    wait_callback = build_unlock_wait_callback(
+        wait_msg,
+        auto_unlock=auto_unlock,
+    )
+
+    try:
+        result = await unlock_and_fetch(
+            resource_id,
+            user_id=user_id,
+            wait_callback=wait_callback,
+        )
+    except Exception as exc:
+        logging.error("❌ 解锁出错: %s", exc)
+        error_text = f"❌ {'自动' if auto_unlock else ''}解锁失败，请稍后重试"
+        try:
+            await wait_msg.edit_text(error_text, parse_mode="HTML")
+        except Exception:
+            await fallback_msg.reply(error_text, parse_mode="HTML")
+        return False
+
+    if result and result.get("link"):
+        await handle_link_extracted(
+            wait_msg,
+            result["link"],
+            result.get("code", "无"),
+            auto_unlock=auto_unlock,
+            website=result.get("website") or website,
+            requester_user_id=user_id,
+        )
+        return True
+
+    if auto_unlock:
+        await notify_auto_unlock_failed(wait_msg, fallback_msg)
+    else:
+        try:
+            await wait_msg.edit_text("❌ 解锁失败，请稍后重试", parse_mode="HTML")
+        except Exception:
+            await fallback_msg.reply("❌ 解锁失败，请稍后重试", parse_mode="HTML")
+    return False
+
+
+async def handle_unlock_required(
+    *,
+    wait_msg: Message,
+    fallback_msg: Message,
+    resource_id: str,
+    user_id: int,
+    result: dict,
+    website: str,
+) -> bool:
+    """统一处理需要解锁的资源。返回 True 表示流程已结束。"""
+    points = result["points"]
+
+    if AUTO_UNLOCK_THRESHOLD > 0 and points <= AUTO_UNLOCK_THRESHOLD:
+        logging.info(f"🤖 自动解锁: {points} 积分 <= {AUTO_UNLOCK_THRESHOLD} 积分阈值")
+        await perform_unlock_and_handle_result(
+            wait_msg=wait_msg,
+            fallback_msg=fallback_msg,
+            resource_id=resource_id,
+            user_id=user_id,
+            auto_unlock=True,
+            website=website,
+        )
+        return True
+
+    user_points = await get_user_points()
+
+    if user_points is not None and user_points < points:
+        session_id = result.get("session_id")
+        if session_id:
+            await session_manager.close_session(session_id)
+
+        await wait_msg.edit_text(
+            format_error_message(
+                'insufficient_points',
+                f"需要: <code>{points}</code> 积分\n"
+                f"当前: <code>{user_points}</code> 积分\n"
+                f"缺少: <code>{points - user_points}</code> 积分"
+            ),
+            parse_mode="HTML"
+        )
+        return True
+
+    text, kb = format_unlock_confirmation(resource_id, points, user_points)
+    await wait_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    return True
+
+
+async def fetch_download_link_and_handle_result(
+    *,
+    wait_msg: Message,
+    fallback_msg: Message,
+    resource_id: str,
+    user_id: int,
+    website: str,
+):
+    """统一处理无需确认的提取链路（免费/已解锁资源也走解锁队列）。"""
+    wait_callback = build_unlock_wait_callback(
+        wait_msg,
+        auto_unlock=False,
+        title="提取排队中",
+        tip="💡 HDHive 提取底层也会调用解锁接口，当前正在按限速队列等待",
+    )
+
+    try:
+        result = await unlock_resource(
+            resource_id,
+            user_id=user_id,
+            wait_callback=wait_callback,
+        )
+    except Exception as exc:
+        logging.error("❌ 提取链接出错: %s", exc)
+        await wait_msg.edit_text(
+            format_error_message('fetch_failed'),
+            parse_mode="HTML"
+        )
+        return False
+
+    link = str((result or {}).get("full_url") or (result or {}).get("url") or "").strip()
+    if not link:
+        await wait_msg.edit_text(
+            format_error_message('fetch_failed'),
+            parse_mode="HTML"
+        )
+        return False
+
+    await handle_link_extracted(
+        wait_msg,
+        link,
+        (result or {}).get("access_code") or "无",
+        auto_unlock=False,
+        website=website,
+        requester_user_id=user_id,
+    )
+    return True
+
+
 async def handle_link_extracted(
     wait_msg: Message,
     link: str,
     code: str = "无",
     auto_unlock: bool = False,
     website: str | None = None,
+    requester_user_id: int | None = None,
 ):
     """
     统一处理链接提取成功后的逻辑
@@ -149,6 +397,7 @@ async def handle_link_extracted(
         link: 115链接
         code: 提取码
         auto_unlock: 是否是自动解锁
+        requester_user_id: 触发本次提取的用户 ID
     """
     provider_key, provider_name = detect_provider_by_website(website)
     if provider_key == "unknown":
@@ -160,7 +409,10 @@ async def handle_link_extracted(
 
     if can_auto_add_sa:
         message_id = wait_msg.message_id
-        
+        task_key = make_message_state_key(wait_msg)
+        if not task_key:
+            await wait_msg.edit_text("❌ 无法记录自动添加状态，请稍后重试", parse_mode="HTML")
+            return
         # 显示网盘链接按钮
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=button_text, url=link)]
@@ -183,11 +435,13 @@ async def handle_link_extracted(
         )
         
         # 创建自动添加任务
-        task = asyncio.create_task(auto_add_to_sa(message_id, link, wait_msg, countdown=SA_AUTO_ADD_DELAY))
-        pending_sa_tasks[message_id] = {
+        task = asyncio.create_task(auto_add_to_sa(task_key, link, wait_msg, countdown=SA_AUTO_ADD_DELAY))
+        pending_sa_tasks[task_key] = {
             "link": link,
             "task": task,
-            "cancelled": False
+            "cancelled": False,
+            "user_id": requester_user_id,
+            "created_at": time.time(),
         }
         
         logging.info(f"⏰ 已启动自动添加倒计时: {link}")
@@ -243,15 +497,38 @@ async def check_user_permission(message: Message) -> bool:
     return True
 
 
+def resolve_message_owner_id(message: Message | None) -> int | None:
+    current = message
+    for _ in range(3):
+        if not current:
+            return None
+        from_user = getattr(current, "from_user", None)
+        if from_user and not getattr(from_user, "is_bot", False):
+            return from_user.id
+        current = getattr(current, "reply_to_message", None)
+    return None
+
+
 async def check_callback_permission(callback: CallbackQuery) -> bool:
     """检查回调操作者是否有权限。"""
-    if ALLOWED_USER_ID == 0:
+    user_id = callback.from_user.id
+
+    if ALLOWED_USER_ID != 0:
+        if user_id != ALLOWED_USER_ID:
+            await callback.answer("⛔️ 权限不足", show_alert=True)
+            logging.warning(f"❌ 用户 {user_id} ({callback.from_user.username}) 尝试点击受限按钮但被拒绝")
+            return False
         return True
 
-    user_id = callback.from_user.id
-    if user_id != ALLOWED_USER_ID:
-        await callback.answer("⛔️ 权限不足", show_alert=True)
-        logging.warning(f"❌ 用户 {user_id} ({callback.from_user.username}) 尝试点击受限按钮但被拒绝")
+    owner_user_id = resolve_message_owner_id(callback.message)
+    if owner_user_id and owner_user_id != user_id:
+        await callback.answer("⛔️ 只能由发起人操作", show_alert=True)
+        logging.warning(
+            "❌ 用户 %s (%s) 尝试点击他人会话按钮，owner=%s",
+            user_id,
+            callback.from_user.username,
+            owner_user_id,
+        )
         return False
     return True
 
@@ -443,7 +720,12 @@ async def cmd_rm_strm(message: Message):
         await wait_msg.edit_text(preview_text, parse_mode="HTML")
         return
 
-    rm_strm_pending_confirms[wait_msg.message_id] = {
+    state_key = make_message_state_key(wait_msg)
+    if not state_key:
+        await wait_msg.edit_text("❌ 无法记录确认状态，请稍后重试", parse_mode="HTML")
+        return
+
+    rm_strm_pending_confirms[state_key] = {
         "user_id": message.from_user.id,
         "created_at": time.time(),
         "preview_text": preview_text,
@@ -465,29 +747,41 @@ async def cmd_rm_strm(message: Message):
 
 @router.message(Command("hdc"))
 async def cmd_cancel_sa(message: Message):
-    """取消最近一次的自动添加到SA任务"""
+    """取消当前用户最近一次的自动添加到SA任务"""
     if not await check_user_permission(message):
         return
-    
-    latest_task = None
+
+    user_id = message.from_user.id
     latest_message_id = None
-    
+    latest_task = None
+    latest_created_at = -1.0
+
     for msg_id, task_info in pending_sa_tasks.items():
-        if not task_info["cancelled"]:
+        if task_info.get("cancelled"):
+            continue
+        if task_info.get("user_id") != user_id:
+            continue
+        created_at = float(task_info.get("created_at") or 0)
+        if created_at >= latest_created_at:
+            latest_created_at = created_at
             latest_message_id = msg_id
             latest_task = task_info
-            break
-    
+
     if latest_task:
         latest_task["cancelled"] = True
         latest_task["task"].cancel()
-        
+
         await message.reply(
-            f"✅ 已取消自动添加任务\n\n"
+            f"✅ 已取消最近一次自动添加任务\n\n"
             f"🔗 链接: {latest_task['link']}",
             parse_mode="HTML"
         )
-        logging.info(f"❌ 用户取消了自动添加任务: {latest_task['link']}")
+        logging.info(
+            "❌ 用户取消了自动添加任务: user_id=%s message_id=%s link=%s",
+            user_id,
+            latest_message_id,
+            latest_task["link"],
+        )
     else:
         await message.reply("⚠️ 没有进行中的自动添加任务", parse_mode="HTML")
 
@@ -605,74 +899,41 @@ async def handle_resource_link(message: Message, resource_id: str, resource_url:
         parse_mode="HTML"
     )
     
-    # 使用会话管理模式
-    result = await fetch_download_link(
-        resource_id,
-        user_id=user_id,
-        keep_session=True,
-        start_url=resource_url,
-    )
+    try:
+        # 使用会话管理模式
+        result = await fetch_download_link(
+            resource_id,
+            user_id=user_id,
+            keep_session=True,
+            start_url=resource_url,
+        )
+    except Exception as exc:
+        logging.error("❌ 资源链接提取前置检查失败: %s", exc)
+        await wait_msg.edit_text(
+            format_error_message('fetch_failed'),
+            parse_mode="HTML"
+        )
+        return
     website = (result or {}).get("website") or resource_website_cache.get(resource_id, "")
     
     if result and result.get("need_unlock"):
-        # 需要解锁
-        points = result["points"]
-        
-        # 检查是否自动解锁
-        if AUTO_UNLOCK_THRESHOLD > 0 and points <= AUTO_UNLOCK_THRESHOLD:
-            # 自动解锁
-            logging.info(f"🤖 自动解锁: {points} 积分 <= {AUTO_UNLOCK_THRESHOLD} 积分阈值")
-            await wait_msg.edit_text(
-                f"🤖 <b>自动解锁中...</b>\n\n"
-                f"🆔 <code>{resource_id}</code>\n"
-                f"💰 消耗积分: <code>{points}</code>",
-                parse_mode="HTML"
-            )
-            
-            # 执行解锁
-            unlock_result = await unlock_and_fetch(resource_id, user_id=user_id)
-            
-            if unlock_result and unlock_result.get("link"):
-                await handle_link_extracted(
-                    wait_msg,
-                    unlock_result["link"],
-                    unlock_result.get("code", "无"),
-                    auto_unlock=True,
-                    website=unlock_result.get("website") or website,
-                )
-            else:
-                await notify_auto_unlock_failed(wait_msg, message)
+        if await handle_unlock_required(
+            wait_msg=wait_msg,
+            fallback_msg=message,
+            resource_id=resource_id,
+            user_id=user_id,
+            result=result,
+            website=website,
+        ):
             return
-
-        user_points = await get_user_points()
-
-        if user_points is not None and user_points < points:
-            # 积分不足，关闭会话
-            session_id = result.get("session_id")
-            if session_id:
-                await session_manager.close_session(session_id)
-            
-            await wait_msg.edit_text(
-                format_error_message('insufficient_points',
-                    f"需要: <code>{points}</code> 积分\n"
-                    f"当前: <code>{user_points}</code> 积分\n"
-                    f"缺少: <code>{points - user_points}</code> 积分"),
-                parse_mode="HTML"
-            )
-            return
-        
-        # 询问是否解锁（会话保持打开）
-        text, kb = format_unlock_confirmation(resource_id, points, user_points)
-        await wait_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
-        return
     
-    elif result and result.get("link"):
-        # 成功提取链接 - 统一使用 handle_link_extracted 处理
-        await handle_link_extracted(
-            wait_msg,
-            result["link"],
-            result.get("code", "无"),
-            auto_unlock=False,
+    elif result and (result.get("link") or result.get("need_unlock") is False):
+        # 成功提取链接 - 统一使用队列处理底层 unlock 接口
+        await fetch_download_link_and_handle_result(
+            wait_msg=wait_msg,
+            fallback_msg=message,
+            resource_id=resource_id,
+            user_id=user_id,
             website=result.get("website") or website,
         )
         return
@@ -716,14 +977,18 @@ async def handle_tmdb_link(message: Message, tmdb_id: str, media_type: str):
         website = str(res.get("website") or "")
         if rid and website:
             resource_website_cache[rid] = website
+            trim_dict_cache(resource_website_cache, RESOURCE_WEBSITE_CACHE_LIMIT)
 
     text, kb = format_resource_list(resources, media_type, provider_filter="115")
     await wait_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
-    resource_list_state[wait_msg.message_id] = {
-        "resources": resources,
-        "media_type": media_type,
-        "title": None,
-    }
+    state_key = make_message_state_key(wait_msg)
+    if state_key:
+        resource_list_state[state_key] = {
+            "resources": resources,
+            "media_type": media_type,
+            "title": None,
+        }
+        trim_dict_cache(resource_list_state, RESOURCE_LIST_STATE_LIMIT)
 
 
 async def handle_keyword_search(message: Message, keyword: str, search_type: str):
@@ -757,10 +1022,13 @@ async def handle_keyword_search(message: Message, keyword: str, search_type: str
 
             result_text, kb = build_tmdb_candidate_message(tmdb_result, page=0)
             sent_msg = await message.reply(result_text, reply_markup=kb, parse_mode="HTML")
-            tmdb_search_state[sent_msg.message_id] = {
-                "results": tmdb_result,
-                "page": 0,
-            }
+            state_key = make_message_state_key(sent_msg)
+            if state_key:
+                tmdb_search_state[state_key] = {
+                    "results": tmdb_result,
+                    "page": 0,
+                }
+                trim_dict_cache(tmdb_search_state, TMDB_SEARCH_STATE_LIMIT)
             elapsed = int((time.monotonic() - start_ts) * 1000)
             logging.info("✅ TMDB多结果返回: keyword=%s type=%s count=%s cost_ms=%s", keyword, search_type, len(tmdb_result), elapsed)
             return
@@ -807,18 +1075,24 @@ async def handle_keyword_search(message: Message, keyword: str, search_type: str
         # 发送资源列表
         if tmdb_info:
             sent_msg = await message.reply(text, reply_markup=kb, parse_mode="HTML")
-            resource_list_state[sent_msg.message_id] = {
-                "resources": resources,
-                "media_type": media_type,
-                "title": None,
-            }
+            state_key = make_message_state_key(sent_msg)
+            if state_key:
+                resource_list_state[state_key] = {
+                    "resources": resources,
+                    "media_type": media_type,
+                    "title": None,
+                }
+                trim_dict_cache(resource_list_state, RESOURCE_LIST_STATE_LIMIT)
         else:
             await wait_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
-            resource_list_state[wait_msg.message_id] = {
-                "resources": resources,
-                "media_type": media_type,
-                "title": None,
-            }
+            state_key = make_message_state_key(wait_msg)
+            if state_key:
+                resource_list_state[state_key] = {
+                    "resources": resources,
+                    "media_type": media_type,
+                    "title": None,
+                }
+                trim_dict_cache(resource_list_state, RESOURCE_LIST_STATE_LIMIT)
 
         elapsed = int((time.monotonic() - start_ts) * 1000)
         logging.info("✅ 关键词搜索完成: keyword=%s type=%s resources=%s cost_ms=%s", keyword, search_type, len(resources), elapsed)
@@ -845,7 +1119,8 @@ async def callback_rm_strm_confirm(callback: CallbackQuery):
         await callback.answer("确认消息不匹配", show_alert=True)
         return
 
-    pending = rm_strm_pending_confirms.get(msg.message_id)
+    state_key = make_message_state_key(msg)
+    pending = rm_strm_pending_confirms.get(state_key or "")
     if not pending:
         await callback.answer("确认已失效，请重新执行 /rm_strm", show_alert=True)
         return
@@ -856,7 +1131,8 @@ async def callback_rm_strm_confirm(callback: CallbackQuery):
 
     created_at = float(pending.get("created_at") or 0)
     if time.time() - created_at > RM_STRM_CONFIRM_TTL:
-        rm_strm_pending_confirms.pop(msg.message_id, None)
+        if state_key:
+            rm_strm_pending_confirms.pop(state_key, None)
         await msg.edit_reply_markup(reply_markup=None)
         await callback.answer("确认已过期，请重新执行 /rm_strm", show_alert=True)
         return
@@ -864,7 +1140,8 @@ async def callback_rm_strm_confirm(callback: CallbackQuery):
     await callback.answer("开始删除…")
     await msg.edit_text("🧹 已确认，正在执行 STRM 空目录实际删除…", parse_mode="HTML")
     result = await strm_prune_service.run(apply_changes=True)
-    rm_strm_pending_confirms.pop(msg.message_id, None)
+    if state_key:
+        rm_strm_pending_confirms.pop(state_key, None)
     prefix = "✅" if result.get("ok") else "❌"
     await msg.edit_text(f"{prefix} {result.get('message', '未知结果')}", parse_mode="HTML")
 
@@ -884,7 +1161,8 @@ async def callback_rm_strm_cancel(callback: CallbackQuery):
         await callback.answer("取消消息不匹配", show_alert=True)
         return
 
-    pending = rm_strm_pending_confirms.get(msg.message_id)
+    state_key = make_message_state_key(msg)
+    pending = rm_strm_pending_confirms.get(state_key or "")
     if not pending:
         await callback.answer("这条确认已失效", show_alert=True)
         return
@@ -894,7 +1172,8 @@ async def callback_rm_strm_cancel(callback: CallbackQuery):
         return
 
     preview_text = str(pending.get("preview_text") or "🧹 本次仅执行了预览")
-    rm_strm_pending_confirms.pop(msg.message_id, None)
+    if state_key:
+        rm_strm_pending_confirms.pop(state_key, None)
     await callback.answer("已取消")
     await msg.edit_text(f"{preview_text}\n\n❎ 已取消实际删除，本次仅保留预览结果。", parse_mode="HTML")
 
@@ -902,12 +1181,16 @@ async def callback_rm_strm_cancel(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("pf:"))
 async def callback_provider_filter(callback: CallbackQuery):
     """切换资源网盘筛选（常驻按钮）"""
-    await callback.answer()
-    msg = callback.message
-    if not msg:
+    if not await check_callback_permission(callback):
         return
 
-    state = resource_list_state.get(msg.message_id)
+    msg = callback.message
+    if not msg:
+        await callback.answer()
+        return
+
+    state_key = make_message_state_key(msg)
+    state = resource_list_state.get(state_key or "")
     if not state:
         await callback.answer("列表已过期，请重新搜索", show_alert=True)
         return
@@ -920,17 +1203,22 @@ async def callback_provider_filter(callback: CallbackQuery):
         provider_filter=provider,
     )
     await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("tmdb_page:"))
 async def callback_tmdb_page(callback: CallbackQuery):
     """切换 TMDB 候选列表分页。"""
+    if not await check_callback_permission(callback):
+        return
+
     msg = callback.message
     if not msg:
         await callback.answer()
         return
 
-    state = tmdb_search_state.get(msg.message_id)
+    state_key = make_message_state_key(msg)
+    state = tmdb_search_state.get(state_key or "")
     if not state:
         await callback.answer("列表已过期，请重新搜索", show_alert=True)
         return
@@ -962,6 +1250,9 @@ async def callback_get_resource(callback: CallbackQuery):
 
     Callback data 格式: tv_1:resource_id 或 movie_1:resource_id
     """
+    if not await check_callback_permission(callback):
+        return
+
     await callback.answer()
 
     wait_msg: Message | None = None
@@ -988,65 +1279,34 @@ async def callback_get_resource(callback: CallbackQuery):
         )
 
         # 提取链接（使用会话管理）
-        result = await fetch_download_link(resource_id, user_id=user_id, keep_session=True)
+        try:
+            result = await fetch_download_link(resource_id, user_id=user_id, keep_session=True)
+        except Exception as exc:
+            logging.error("❌ 资源选择前置检查失败: %s", exc)
+            await wait_msg.edit_text(
+                format_error_message('fetch_failed'),
+                parse_mode="HTML"
+            )
+            return
         website = (result or {}).get("website") or resource_website_cache.get(resource_id, "")
 
         if result and result.get("need_unlock"):
-            # 需要解锁
-            points = result["points"]
-
-            # 检查是否自动解锁
-            if AUTO_UNLOCK_THRESHOLD > 0 and points <= AUTO_UNLOCK_THRESHOLD:
-                logging.info(f"🤖 自动解锁: {points} 积分 <= {AUTO_UNLOCK_THRESHOLD} 积分阈值")
-                await wait_msg.edit_text(
-                    f"🤖 <b>自动解锁中...</b>\n\n"
-                    f"🆔 <code>{resource_id}</code>\n"
-                    f"💰 消耗积分: <code>{points}</code>",
-                    parse_mode="HTML"
-                )
-
-                unlock_result = await unlock_and_fetch(resource_id, user_id=user_id)
-
-                if unlock_result and unlock_result.get("link"):
-                    await handle_link_extracted(
-                        wait_msg,
-                        unlock_result["link"],
-                        unlock_result.get("code", "无"),
-                        auto_unlock=True,
-                        website=unlock_result.get("website") or website,
-                    )
-                else:
-                    await notify_auto_unlock_failed(wait_msg, msg)
+            if await handle_unlock_required(
+                wait_msg=wait_msg,
+                fallback_msg=msg,
+                resource_id=resource_id,
+                user_id=user_id,
+                result=result,
+                website=website,
+            ):
                 return
 
-            user_points = await get_user_points()
-
-            if user_points is not None and user_points < points:
-                session_id = result.get("session_id")
-                if session_id:
-                    await session_manager.close_session(session_id)
-
-                await wait_msg.edit_text(
-                    format_error_message(
-                        'insufficient_points',
-                        f"需要: <code>{points}</code> 积分\n"
-                        f"当前: <code>{user_points}</code> 积分\n"
-                        f"缺少: <code>{points - user_points}</code> 积分"
-                    ),
-                    parse_mode="HTML"
-                )
-                return
-
-            # 询问是否解锁（保留资源选择页，会话保持打开）
-            text, kb = format_unlock_confirmation(resource_id, points, user_points)
-            await wait_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
-            return
-
-        if result and result.get("link"):
-            await handle_link_extracted(
-                wait_msg,
-                result["link"],
-                result.get("code", "无"),
+        if result and (result.get("link") or result.get("need_unlock") is False):
+            await fetch_download_link_and_handle_result(
+                wait_msg=wait_msg,
+                fallback_msg=msg,
+                resource_id=resource_id,
+                user_id=user_id,
                 website=result.get("website") or website,
             )
             return
@@ -1071,33 +1331,23 @@ async def callback_unlock_resource(callback: CallbackQuery):
     
     Callback data 格式: unlock:resource_id
     """
+    if not await check_callback_permission(callback):
+        return
+
     await callback.answer("🔓 正在解锁...")
     
     try:
         user_id = callback.from_user.id
         resource_id = callback.data.split(":")[1]
-        
-        # 更新消息
-        await callback.message.edit_text(
-            f"🔓 <b>正在解锁资源...</b>\n\n🆔 <code>{resource_id}</code>",
-            parse_mode="HTML"
+
+        await perform_unlock_and_handle_result(
+            wait_msg=callback.message,
+            fallback_msg=callback.message,
+            resource_id=resource_id,
+            user_id=user_id,
+            auto_unlock=False,
+            website=resource_website_cache.get(resource_id, ""),
         )
-        
-        # 执行解锁（使用已有会话）
-        result = await unlock_and_fetch(resource_id, user_id=user_id)
-        
-        if result and result.get("link"):
-            await handle_link_extracted(
-                callback.message,
-                result["link"],
-                result.get("code", "无"),
-                website=result.get("website") or resource_website_cache.get(resource_id, ""),
-            )
-        else:
-            await callback.message.edit_text(
-                "❌ 解锁失败，请稍后重试",
-                parse_mode="HTML"
-            )
             
     except Exception as e:
         logging.error(f"❌ 解锁出错: {e}")
@@ -1107,6 +1357,9 @@ async def callback_unlock_resource(callback: CallbackQuery):
 @router.callback_query(F.data == "cancel_unlock")
 async def callback_cancel_unlock(callback: CallbackQuery):
     """处理取消解锁回调"""
+    if not await check_callback_permission(callback):
+        return
+
     await callback.answer("已取消")
     
     # 关闭会话
@@ -1123,12 +1376,12 @@ async def callback_cancel_unlock(callback: CallbackQuery):
     await callback.message.edit_text("❌ 已取消解锁", parse_mode="HTML")
 
 
-async def auto_add_to_sa(message_id: int, link: str, original_message: Message, countdown: int = 60):
+async def auto_add_to_sa(task_key: str, link: str, original_message: Message, countdown: int = 60):
     """
     倒计时自动添加到SA
     
     Args:
-        message_id: 消息ID
+        task_key: 任务键（chat_id:message_id）
         link: 115链接
         original_message: 原始消息对象
         countdown: 倒计时秒数（默认60秒）
@@ -1146,7 +1399,7 @@ async def auto_add_to_sa(message_id: int, link: str, original_message: Message, 
         step = 10 if countdown > 10 else max(1, countdown)
         for remaining in range(countdown, 0, -step):
             # 检查是否被取消
-            if message_id in pending_sa_tasks and pending_sa_tasks[message_id].get("cancelled"):
+            if task_key in pending_sa_tasks and pending_sa_tasks[task_key].get("cancelled"):
                 logging.info(f"⏹️ 用户取消了自动添加: {link}")
                 return
             
@@ -1168,7 +1421,7 @@ async def auto_add_to_sa(message_id: int, link: str, original_message: Message, 
             await asyncio.sleep(step if remaining > step else remaining)
         
         # 倒计时结束，检查是否被取消
-        if message_id in pending_sa_tasks and pending_sa_tasks[message_id].get("cancelled"):
+        if task_key in pending_sa_tasks and pending_sa_tasks[task_key].get("cancelled"):
             return
         
         # 执行添加到SA
@@ -1224,8 +1477,8 @@ async def auto_add_to_sa(message_id: int, link: str, original_message: Message, 
             pass
     finally:
         # 清理任务
-        if message_id in pending_sa_tasks:
-            del pending_sa_tasks[message_id]
+        if task_key in pending_sa_tasks:
+            del pending_sa_tasks[task_key]
 
 
 @router.callback_query(F.data.startswith("send_to_group:"))
@@ -1235,6 +1488,9 @@ async def callback_send_to_sa(callback: CallbackQuery):
     
     Callback data 格式: send_to_group:115_link
     """
+    if not await check_callback_permission(callback):
+        return
+
     try:
         # 提取链接
         link = callback.data.replace("send_to_group:", "")
@@ -1271,9 +1527,6 @@ async def callback_send_to_sa(callback: CallbackQuery):
                     data = await response.json()
                     message = data.get("message", "添加成功")
                     
-                    # 通知用户成功
-                    await callback.answer(f"✅ {message}", show_alert=True)
-                    
                     # 发送详细通知消息
                     notification = (
                         "🎬 <b>已添加到Symedia</b>\n"
@@ -1292,7 +1545,10 @@ async def callback_send_to_sa(callback: CallbackQuery):
                 else:
                     error_text = await response.text()
                     logging.error(f"❌ SA API返回错误: {response.status} - {error_text}")
-                    await callback.answer(f"❌ 添加失败: HTTP {response.status}", show_alert=True)
+                    await callback.message.reply(
+                        f"❌ 添加到 Symedia 失败: HTTP {response.status}",
+                        parse_mode="HTML"
+                    )
         
     except aiohttp.ClientError as e:
         logging.error(f"❌ 网络请求失败: {e}")
@@ -1389,84 +1645,48 @@ async def handle_direct_link(message: Message):
             parse_mode="HTML"
         )
         
-        # 使用会话管理
-        result = await fetch_download_link(
-            resource_id,
-            user_id=user_id,
-            keep_session=True,
-            start_url=resource_url,
-        )
+        try:
+            # 使用会话管理
+            result = await fetch_download_link(
+                resource_id,
+                user_id=user_id,
+                keep_session=True,
+                start_url=resource_url,
+            )
+        except Exception as exc:
+            logging.error("❌ 直接链接前置检查失败: %s", exc)
+            await wait_msg.edit_text(
+                format_error_message('fetch_failed'),
+                parse_mode="HTML"
+            )
+            return
         website = (result or {}).get("website") or resource_website_cache.get(resource_id, "")
         
         if result and result.get("need_unlock"):
-            # 需要解锁
-            points = result["points"]
-            
-            # 检查是否自动解锁
-            if AUTO_UNLOCK_THRESHOLD > 0 and points <= AUTO_UNLOCK_THRESHOLD:
-                # 自动解锁
-                logging.info(f"🤖 自动解锁: {points} 积分 <= {AUTO_UNLOCK_THRESHOLD} 积分阈值")
-                await wait_msg.edit_text(
-                    f"🤖 <b>自动解锁中...</b>\n\n"
-                    f"🆔 <code>{resource_id}</code>\n"
-                    f"💰 消耗积分: <code>{points}</code>",
-                    parse_mode="HTML"
-                )
-                
-                # 执行解锁
-                unlock_result = await unlock_and_fetch(resource_id, user_id=user_id)
-                
-                if unlock_result and unlock_result.get("link"):
-                    # 使用统一的处理函数
-                    await handle_link_extracted(
-                        wait_msg,
-                        unlock_result["link"],
-                        unlock_result.get("code", "无"),
-                        auto_unlock=True,
-                        website=unlock_result.get("website") or website,
-                    )
-                else:
-                    await notify_auto_unlock_failed(wait_msg, message)
+            if await handle_unlock_required(
+                wait_msg=wait_msg,
+                fallback_msg=message,
+                resource_id=resource_id,
+                user_id=user_id,
+                result=result,
+                website=website,
+            ):
                 return
-            
-            user_points = await get_user_points()
-
-            if user_points is not None and user_points < points:
-                # 积分不足，关闭会话
-                session_id = result.get("session_id")
-                if session_id:
-                    await session_manager.close_session(session_id)
-                
-                await wait_msg.edit_text(
-                    f"❌ <b>积分不足</b>\n\n"
-                    f"需要: <code>{points}</code> 积分\n"
-                    f"当前: <code>{user_points}</code> 积分\n"
-                    f"缺少: <code>{points - user_points}</code> 积分",
-                    parse_mode="HTML"
-                )
-                return
-            
-            # 询问是否解锁（会话保持打开）
-            text, kb = format_unlock_confirmation(resource_id, points, user_points)
-            await wait_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
-            return
         
-        elif result and result.get("link"):
-            # 成功提取链接
-            link = result["link"]
-            code = result.get("code", "无")
-            
-            # 使用统一的处理函数
-            await handle_link_extracted(
-                wait_msg,
-                link,
-                code,
-                auto_unlock=False,
+        elif result and (result.get("link") or result.get("need_unlock") is False):
+            await fetch_download_link_and_handle_result(
+                wait_msg=wait_msg,
+                fallback_msg=message,
+                resource_id=resource_id,
+                user_id=user_id,
                 website=result.get("website") or website,
             )
             return
-        
-        # 已处理资源链接，不再处理其他链接
+
+        await wait_msg.edit_text(
+            format_error_message('fetch_failed'),
+            parse_mode="HTML"
+        )
         return
     
     # 处理TMDB链接（tv/movie）- 从提取的URL中查找
@@ -1505,11 +1725,14 @@ async def handle_direct_link(message: Message):
             
             text, kb = format_resource_list(resources, media_type, provider_filter="115")
             await wait_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
-            resource_list_state[wait_msg.message_id] = {
-                "resources": resources,
-                "media_type": media_type,
-                "title": None,
-            }
+            state_key = make_message_state_key(wait_msg)
+            if state_key:
+                resource_list_state[state_key] = {
+                    "resources": resources,
+                    "media_type": media_type,
+                    "title": None,
+                }
+                trim_dict_cache(resource_list_state, RESOURCE_LIST_STATE_LIMIT)
             return
 
 
@@ -1520,14 +1743,19 @@ async def callback_select_tmdb(callback: CallbackQuery):
     
     Callback data 格式: select_tmdb:tmdb_id:media_type
     """
+    if not await check_callback_permission(callback):
+        return
+
+    await callback.answer()
+
     try:
         msg = callback.message
         if not msg:
-            await callback.answer()
             return
 
         tmdb_info = None
-        state = tmdb_search_state.get(msg.message_id)
+        state_key = make_message_state_key(msg)
+        state = tmdb_search_state.get(state_key or "")
 
         if state:
             parts = (callback.data or "").split(":")
@@ -1548,7 +1776,8 @@ async def callback_select_tmdb(callback: CallbackQuery):
             tmdb_info = results[selected_index]
             tmdb_id = str(tmdb_info["tmdb_id"])
             media_type = tmdb_info["media_type"]
-            tmdb_search_state.pop(msg.message_id, None)
+            if state_key:
+                tmdb_search_state.pop(state_key, None)
         else:
             # 兼容旧格式: select_tmdb:12345:movie
             parts = (callback.data or "").split(":")
@@ -1622,18 +1851,24 @@ async def callback_select_tmdb(callback: CallbackQuery):
         # 如果已经发送了TMDB信息，在新消息中显示资源列表
         if tmdb_info and tmdb_info.get("poster_url"):
             sent_msg = await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
-            resource_list_state[sent_msg.message_id] = {
-                "resources": resources,
-                "media_type": media_type,
-                "title": None,
-            }
+            state_key = make_message_state_key(sent_msg)
+            if state_key:
+                resource_list_state[state_key] = {
+                    "resources": resources,
+                    "media_type": media_type,
+                    "title": None,
+                }
+                trim_dict_cache(resource_list_state, RESOURCE_LIST_STATE_LIMIT)
         else:
             await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-            resource_list_state[callback.message.message_id] = {
-                "resources": resources,
-                "media_type": media_type,
-                "title": None,
-            }
+            state_key = make_message_state_key(callback.message)
+            if state_key:
+                resource_list_state[state_key] = {
+                    "resources": resources,
+                    "media_type": media_type,
+                    "title": None,
+                }
+                trim_dict_cache(resource_list_state, RESOURCE_LIST_STATE_LIMIT)
         
     except Exception as e:
         logging.error(f"❌ 处理TMDB选择失败: {e}")
