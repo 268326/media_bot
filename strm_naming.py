@@ -24,19 +24,47 @@ NOT_GROUP_TOKENS = {
 }
 
 DELIM_CLASS = r"[.\-\s_\[\](){}]"
+NO_RELEASE_GROUP_TAIL_PATTERNS = [
+    r"WEB[.\-_ ]?DL",
+    r"WEB[.\-_ ]?RIP",
+    r"BLU[.\-_ ]?RAY",
+    r"DTS[.\-_ ]?HD(?:[.\-_ ]?(?:MA|HRA))?",
+    r"(?:TRUEHD|DOLBY)[.\-_ ]?ATMOS",
+]
 
 
-def extract_source_tag(name_part: str) -> str:
+def extract_source_tags(name_part: str) -> list[str]:
+    found: list[str] = []
     for pat, norm in SOURCE_PATTERNS:
         if re.search(rf"(?i)(^|{DELIM_CLASS}){pat}(?=({DELIM_CLASS}|$))", name_part):
-            return norm
-    return ""
+            found.append(norm)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in found:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+    return deduped
+
+
+def looks_like_hyphenated_tech_tail(name_part: str) -> bool:
+    return bool(
+        re.search(
+            rf"(?i)(?:^|{DELIM_CLASS})(?:" + "|".join(NO_RELEASE_GROUP_TAIL_PATTERNS) + r")$",
+            name_part,
+        )
+    )
 
 
 def extract_release_group(name_part: str) -> tuple[str, str]:
     # 仅把“末尾独立发布组”识别为 release group，避免把 WEB-DL 这类
     # 技术标签中的连字符误判成发布组分隔符。
     if "-" not in name_part:
+        return name_part, ""
+
+    if looks_like_hyphenated_tech_tail(name_part):
         return name_part, ""
 
     left, grp = name_part.rsplit("-", 1)
@@ -305,12 +333,12 @@ def parse_media_info(data: dict) -> dict:
 def generate_new_name(old_name: str, info: dict) -> str:
     name_part, ext = os.path.splitext(old_name)
     main_body, group = extract_release_group(name_part)
-    source = extract_source_tag(main_body)
-    clean = wipe_tags(main_body, info=info, has_source=bool(source))
+    source_tags = extract_source_tags(main_body)
+    clean = wipe_tags(main_body, info=info, has_source=bool(source_tags))
 
     tags_order = [
         info.get("res", ""),
-        source,
+        *source_tags,
         info.get("fps", ""),
         info.get("hdr", ""),
         info.get("v_codec", ""),
