@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 ASS_MENU_PREFIX = "ass_menu:"
 ASS_MUX_PREFIX = "ass_mux:"
 ASS_MUX_SESSION_TTL = 1800
+TG_TEXT_SAFE_LIMIT = 3800
 
 
 @dataclass(slots=True)
@@ -50,6 +51,7 @@ class AssMuxSession:
     selected_sub_index: int | None = None
     awaiting_field: str | None = None
     awaiting_message_id: int | None = None
+    preview_message_id: int | None = None
     created_at: float = field(default_factory=time.monotonic)
     updated_at: float = field(default_factory=time.monotonic)
 
@@ -70,6 +72,35 @@ class AssService:
     @staticmethod
     def _session_key(chat_id: int, owner_user_id: int) -> str:
         return f'{chat_id}:{owner_user_id}'
+
+    @staticmethod
+    def _join_lines_for_tg(
+        lines: list[str],
+        *,
+        limit: int = TG_TEXT_SAFE_LIMIT,
+        truncation_note: str = '… <i>内容过长，已自动截断。</i>',
+    ) -> str:
+        result: list[str] = []
+        total = 0
+        for line in lines:
+            extra = len(line) + (1 if result else 0)
+            if total + extra > limit:
+                break
+            result.append(line)
+            total += extra
+
+        if len(result) == len(lines):
+            return '\n'.join(result)
+
+        note_extra = len(truncation_note) + (1 if result else 0)
+        while result and total + note_extra > limit:
+            removed = result.pop()
+            total -= len(removed) + (1 if result else 0)
+            note_extra = len(truncation_note) + (1 if result else 0)
+        if not result and len(truncation_note) > limit:
+            return truncation_note[:limit]
+        result.append(truncation_note)
+        return '\n'.join(result)
 
     async def run_subset(self, bot: Bot, trigger_chat_id: int) -> tuple[bool, str]:
         acquired = self.lock.acquire(blocking=False)
@@ -151,6 +182,16 @@ class AssService:
     def clear_mux_session(self, chat_id: int, owner_user_id: int) -> None:
         self.mux_sessions.pop(self._session_key(chat_id, owner_user_id), None)
 
+    def bind_mux_message_ids(self, chat_id: int, owner_user_id: int, *, panel_message_id: int | None = None, preview_message_id: int | None = None) -> None:
+        session = self.get_mux_session(chat_id, owner_user_id)
+        if not session:
+            return
+        if panel_message_id is not None:
+            session.awaiting_message_id = panel_message_id
+        if preview_message_id is not None:
+            session.preview_message_id = preview_message_id
+        session.touch()
+
     def ensure_mux_owner(self, chat_id: int, user_id: int) -> bool:
         session = self.get_mux_session(chat_id, user_id)
         if not session:
@@ -169,9 +210,17 @@ class AssService:
         if not session:
             raise AssPipelineError('当前没有进行中的字幕内封会话，请重新发送 /ass')
         session.touch()
-        base = self._format_mux_session(session)
+        lines = self._format_mux_session(session).split('\n')
+        return self._join_lines_for_tg(lines)
+
+
+    async def build_mux_preview_text(self, chat_id: int, owner_user_id: int) -> str:
+        session = self.get_mux_session(chat_id, owner_user_id)
+        if not session:
+            raise AssPipelineError('当前没有进行中的字幕内封会话，请重新发送 /ass')
+        session.touch()
         if not session.plan:
-            return base
+            return '🎞️ <b>计划预览</b>\n\n尚未生成计划。'
 
         preview_lines = ['🎞️ <b>当前页计划预览</b>', '']
         current_items = self._current_plan_page_items(session)
@@ -189,7 +238,10 @@ class AssService:
             preview_lines.append('')
         if not current_items:
             preview_lines.append('• <code>当前页没有条目</code>')
-        return base + '\n\n' + '\n'.join(preview_lines).rstrip()
+        return self._join_lines_for_tg(
+            preview_lines,
+            truncation_note='… <i>当前页预览过长，已自动截断；可继续翻页或进入单项编辑查看更多。</i>',
+        )
 
     async def rebuild_mux_plan(self, chat_id: int, owner_user_id: int) -> tuple[AssMuxSession, str]:
         session = self.get_mux_session(chat_id, owner_user_id)
@@ -208,6 +260,7 @@ class AssService:
         logger.info('🎬 /ass 生成字幕内封计划: chat_id=%s items=%s tracks=%s plan=%s', chat_id, len(plan.items), plan.total_sub_tracks, session.settings.plan_path)
         text = format_mux_plan_preview(plan)
         return session, text
+
 
     def _current_plan_page_items(self, session: AssMuxSession, *, page_size: int = 8) -> list[tuple[int, MuxPlanItem]]:
         if not session.plan:
@@ -351,7 +404,10 @@ class AssService:
                 f'轨道语言: <code>{html.escape(sub.mkv_lang)}</code>',
                 f'轨道名: <code>{html.escape(sub.track_name)}</code>',
             ])
-        return '\n'.join(lines)
+        return self._join_lines_for_tg(
+            lines,
+            truncation_note='… <i>该条目详情过长，已自动截断；请继续修改单条字幕项查看。</i>',
+        )
 
     def list_mux_candidate_subs(self, chat_id: int, owner_user_id: int, item_index: int) -> list[str]:
         session = self.get_mux_session(chat_id, owner_user_id)
@@ -384,7 +440,7 @@ class AssService:
         session.selected_item_index = None
         session.selected_sub_index = None
         session.awaiting_field = None
-        session.awaiting_message_id = None
+        session.awaiting_message_id = session.awaiting_message_id
         session.touch()
 
     def _parse_lang_or_raise(self, raw: str) -> tuple[str, str]:

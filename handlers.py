@@ -666,6 +666,39 @@ async def cmd_ass(message: Message):
     await message.reply(text, reply_markup=kb, parse_mode="HTML")
 
 
+async def sync_ass_mux_view(bot, chat_id: int, user_id: int):
+    session = ass_service.get_mux_session(chat_id, user_id)
+    if not session:
+        return
+
+    panel_text = await ass_service.build_mux_panel_text(chat_id, user_id)
+    panel_kb = ass_service.build_mux_plan_keyboard(chat_id, user_id)
+    preview_text = await ass_service.build_mux_preview_text(chat_id, user_id)
+
+    if session.awaiting_message_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=session.awaiting_message_id,
+                text=panel_text,
+                reply_markup=panel_kb,
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+    if session.preview_message_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=session.preview_message_id,
+                text=preview_text,
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+
 @router.message(Command("strm_status"))
 async def cmd_strm_status(message: Message):
     if not await check_user_permission(message):
@@ -1143,9 +1176,17 @@ async def callback_ass_menu(callback: CallbackQuery):
         await callback.answer("开始创建字幕内封会话…")
         try:
             await ass_service.start_mux_session(chat_id=msg.chat.id, owner_user_id=callback.from_user.id)
-            text = await ass_service.build_mux_panel_text(msg.chat.id, callback.from_user.id)
+            panel_text = await ass_service.build_mux_panel_text(msg.chat.id, callback.from_user.id)
             kb = ass_service.build_mux_plan_keyboard(msg.chat.id, callback.from_user.id)
-            await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            await msg.edit_text(panel_text, reply_markup=kb, parse_mode="HTML")
+            preview_msg = await msg.answer("🎞️ <b>计划预览</b>\n\n尚未生成计划。", parse_mode="HTML")
+            ass_service.bind_mux_message_ids(
+                msg.chat.id,
+                callback.from_user.id,
+                panel_message_id=msg.message_id,
+                preview_message_id=preview_msg.message_id,
+            )
+            await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
         except Exception as exc:
             logging.exception("❌ 创建 /ass 字幕内封会话失败")
             await msg.edit_text(f"❌ 创建字幕内封会话失败\n\n<code>{html.escape(str(exc))}</code>", parse_mode="HTML")
@@ -1176,12 +1217,9 @@ async def callback_ass_mux(callback: CallbackQuery):
             if not session:
                 raise RuntimeError("当前会话已失效，请重新发送 /ass")
             session.delete_external_subs = not session.delete_external_subs
-            session.awaiting_message_id = msg.message_id
             session.touch()
             await callback.answer("已切换删除外挂字幕开关")
-            text = await ass_service.build_mux_panel_text(msg.chat.id, callback.from_user.id)
-            kb = ass_service.build_mux_plan_keyboard(msg.chat.id, callback.from_user.id)
-            await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
             return
 
         if payload == "toggle_dry":
@@ -1189,16 +1227,14 @@ async def callback_ass_mux(callback: CallbackQuery):
             if not session:
                 raise RuntimeError("当前会话已失效，请重新发送 /ass")
             session.dry_run = not session.dry_run
-            session.awaiting_message_id = msg.message_id
             session.touch()
             await callback.answer("已切换 DRY-RUN 开关")
-            text = await ass_service.build_mux_panel_text(msg.chat.id, callback.from_user.id)
-            kb = ass_service.build_mux_plan_keyboard(msg.chat.id, callback.from_user.id)
-            await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
             return
 
         if payload == "prompt_group":
-            ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="default_group", message_id=msg.message_id)
+            session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
+            ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="default_group", message_id=session.awaiting_message_id if session and session.awaiting_message_id else msg.message_id)
             await callback.answer("请发送默认字幕组")
             await msg.answer(
                 "✏️ 请输入新的默认字幕组\n\n"
@@ -1210,7 +1246,8 @@ async def callback_ass_mux(callback: CallbackQuery):
             return
 
         if payload == "prompt_lang":
-            ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="default_lang", message_id=msg.message_id)
+            session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
+            ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="default_lang", message_id=session.awaiting_message_id if session and session.awaiting_message_id else msg.message_id)
             await callback.answer("请发送默认语言")
             await msg.answer(
                 "🌐 请输入新的默认语言，例如：<code>chs</code> / <code>cht</code> / <code>eng</code> / <code>chs_eng</code>",
@@ -1222,10 +1259,7 @@ async def callback_ass_mux(callback: CallbackQuery):
             await callback.answer("正在重新扫描生成计划…")
             await msg.edit_text("🔄 正在扫描目录并生成字幕内封计划…", parse_mode="HTML")
             session, preview = await ass_service.rebuild_mux_plan(msg.chat.id, callback.from_user.id)
-            session.awaiting_message_id = msg.message_id
-            panel_text = await ass_service.build_mux_panel_text(msg.chat.id, callback.from_user.id)
-            kb = ass_service.build_mux_plan_keyboard(msg.chat.id, callback.from_user.id)
-            await msg.edit_text(panel_text, reply_markup=kb, parse_mode="HTML")
+            await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
             return
 
         if payload.startswith("page:"):
@@ -1236,11 +1270,8 @@ async def callback_ass_mux(callback: CallbackQuery):
             page = int(page_raw)
             if page != session.plan_page:
                 session.plan_page = max(0, page)
-                session.awaiting_message_id = msg.message_id
                 session.touch()
-                text = await ass_service.build_mux_panel_text(msg.chat.id, callback.from_user.id)
-                kb = ass_service.build_mux_plan_keyboard(msg.chat.id, callback.from_user.id)
-                await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+                await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
             await callback.answer()
             return
 
@@ -1248,9 +1279,6 @@ async def callback_ass_mux(callback: CallbackQuery):
             _, index_raw = payload.split(":", 1)
             item_index = int(index_raw)
             session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
-            if session:
-                session.awaiting_message_id = msg.message_id
-                session.touch()
             await callback.answer("打开条目编辑")
             text = ass_service.format_mux_item_detail(msg.chat.id, callback.from_user.id, item_index)
             kb = ass_service.build_mux_item_keyboard(msg.chat.id, callback.from_user.id, item_index)
@@ -1261,8 +1289,9 @@ async def callback_ass_mux(callback: CallbackQuery):
             _, item_raw, sub_raw = payload.split(":", 2)
             item_index = int(item_raw)
             sub_index = int(sub_raw)
+            session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
             candidates = ass_service.list_mux_candidate_subs(msg.chat.id, callback.from_user.id, item_index)
-            ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="sub_file", item_index=item_index, sub_index=sub_index, message_id=msg.message_id)
+            ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="sub_file", item_index=item_index, sub_index=sub_index, message_id=session.awaiting_message_id if session and session.awaiting_message_id else msg.message_id)
             await callback.answer("请发送新的字幕文件名")
             lines = [
                 "🧩 请输入新的字幕文件名（只输入文件名，不要带路径）",
@@ -1283,7 +1312,8 @@ async def callback_ass_mux(callback: CallbackQuery):
             _, item_raw, sub_raw = payload.split(":", 2)
             item_index = int(item_raw)
             sub_index = int(sub_raw)
-            ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="track_group", item_index=item_index, sub_index=sub_index, message_id=msg.message_id)
+            session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
+            ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="track_group", item_index=item_index, sub_index=sub_index, message_id=session.awaiting_message_id if session and session.awaiting_message_id else msg.message_id)
             await callback.answer("请发送字幕组")
             await msg.answer(
                 "✏️ 请输入新的字幕组\n\n• 直接发送文字 = 设置字幕组\n• 发送 <code>-</code> = 清空字幕组",
@@ -1295,7 +1325,8 @@ async def callback_ass_mux(callback: CallbackQuery):
             _, item_raw, sub_raw = payload.split(":", 2)
             item_index = int(item_raw)
             sub_index = int(sub_raw)
-            ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="track_lang", item_index=item_index, sub_index=sub_index, message_id=msg.message_id)
+            session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
+            ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="track_lang", item_index=item_index, sub_index=sub_index, message_id=session.awaiting_message_id if session and session.awaiting_message_id else msg.message_id)
             await callback.answer("请发送字幕语言")
             await msg.answer(
                 "🌐 请输入新的字幕语言，例如：<code>chs</code> / <code>cht</code> / <code>eng</code> / <code>chs_eng</code>",
@@ -1305,14 +1336,8 @@ async def callback_ass_mux(callback: CallbackQuery):
 
         if payload == "back_plan":
             ass_service.clear_mux_prompt(msg.chat.id, callback.from_user.id)
-            session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
-            if session:
-                session.awaiting_message_id = msg.message_id
-                session.touch()
             await callback.answer("返回计划列表")
-            text = await ass_service.build_mux_panel_text(msg.chat.id, callback.from_user.id)
-            kb = ass_service.build_mux_plan_keyboard(msg.chat.id, callback.from_user.id)
-            await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
             return
 
         if payload == "run_confirm":
@@ -1334,9 +1359,21 @@ async def callback_ass_mux(callback: CallbackQuery):
             return
 
         if payload == "cancel":
+            session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
+            preview_message_id = session.preview_message_id if session else None
             ass_service.clear_mux_session(msg.chat.id, callback.from_user.id)
             await callback.answer("已结束本次会话")
             await msg.edit_text("❎ 已结束本次 /ass 字幕内封会话。", parse_mode="HTML")
+            if preview_message_id:
+                try:
+                    await callback.bot.edit_message_text(
+                        chat_id=msg.chat.id,
+                        message_id=preview_message_id,
+                        text="❎ 该预览已随本次 /ass 会话结束。",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
             return
 
         await callback.answer()
@@ -1824,22 +1861,9 @@ async def handle_direct_link(message: Message):
     session = ass_service.get_mux_session(message.chat.id, message.from_user.id)
     if session and session.awaiting_field and message.from_user.id == session.owner_user_id and message.text and not text.startswith('/'):
         try:
-            panel_message_id = session.awaiting_message_id
             result_text = ass_service.apply_mux_text_input(message.chat.id, message.from_user.id, text)
             await message.reply(result_text, parse_mode="HTML")
-            panel_text = await ass_service.build_mux_panel_text(message.chat.id, message.from_user.id)
-            kb = ass_service.build_mux_plan_keyboard(message.chat.id, message.from_user.id)
-            if panel_message_id:
-                try:
-                    await message.bot.edit_message_text(
-                        chat_id=message.chat.id,
-                        message_id=panel_message_id,
-                        text=panel_text,
-                        reply_markup=kb,
-                        parse_mode="HTML",
-                    )
-                except Exception:
-                    pass
+            await sync_ass_mux_view(message.bot, message.chat.id, message.from_user.id)
         except Exception as exc:
             logging.exception("❌ 处理 /ass 字幕内封输入失败")
             await message.reply(f"❌ 输入无效\n\n<code>{html.escape(str(exc))}</code>", parse_mode="HTML")
