@@ -31,6 +31,7 @@ from ass_formatter import (
     format_subset_summary,
     format_track_group_updated,
     format_track_lang_updated,
+    join_lines_for_tg,
 )
 
 from ass_config import load_ass_settings_from_env
@@ -76,6 +77,7 @@ class AssMuxSession:
     awaiting_field: str | None = None
     awaiting_message_id: int | None = None
     preview_message_id: int | None = None
+    inline_notice: str = ""
     created_at: float = field(default_factory=time.monotonic)
     updated_at: float = field(default_factory=time.monotonic)
 
@@ -192,7 +194,19 @@ class AssService:
         if not session:
             raise AssPipelineError('当前没有进行中的字幕内封会话，请重新发送 /ass')
         session.touch()
-        return format_mux_session(session)
+        lines = [format_mux_session(session)]
+
+        prompt_text = self.get_mux_inline_prompt_text(chat_id, owner_user_id)
+        if prompt_text:
+            lines.extend(['', prompt_text])
+
+        if session.inline_notice:
+            lines.extend(['', session.inline_notice])
+
+        if session.plan:
+            lines.extend(['', await self.build_mux_preview_text(chat_id, owner_user_id)])
+
+        return join_lines_for_tg(lines)
 
 
     async def build_mux_preview_text(self, chat_id: int, owner_user_id: int) -> str:
@@ -228,6 +242,38 @@ class AssService:
             start_no=start_no,
             end_no=end_no,
         )
+
+    def get_mux_inline_prompt_text(self, chat_id: int, owner_user_id: int) -> str:
+        session = self.get_mux_session(chat_id, owner_user_id)
+        if not session or not session.awaiting_field:
+            return ''
+
+        field = session.awaiting_field
+        if field == 'default_group':
+            return '✏️ <b>当前等待输入：默认字幕组</b>\n• 直接发送文字 = 设置字幕组\n• 发送 <code>-</code> = 清空字幕组\n• 输入后请点“重新扫描”生效'
+        if field == 'default_lang':
+            return '🌐 <b>当前等待输入：默认语言</b>\n请输入例如：<code>chs</code> / <code>cht</code> / <code>eng</code> / <code>chs_eng</code>\n• 输入后请点“重新扫描”生效'
+        if field == 'sub_file':
+            return '📄 <b>当前等待输入：字幕文件名</b>\n请输入新的字幕文件名（只输入文件名，不要带路径）'
+        if field == 'track_group':
+            return '🏷️ <b>当前等待输入：字幕组</b>\n• 直接发送文字 = 设置字幕组\n• 发送 <code>-</code> = 清空字幕组'
+        if field == 'track_lang':
+            return '🌐 <b>当前等待输入：字幕语言</b>\n请输入例如：<code>chs</code> / <code>cht</code> / <code>eng</code> / <code>chs_eng</code>'
+        return ''
+
+    def set_mux_inline_notice(self, chat_id: int, owner_user_id: int, text: str) -> None:
+        session = self.get_mux_session(chat_id, owner_user_id)
+        if not session:
+            return
+        session.inline_notice = text
+        session.touch()
+
+    def clear_mux_inline_notice(self, chat_id: int, owner_user_id: int) -> None:
+        session = self.get_mux_session(chat_id, owner_user_id)
+        if not session:
+            return
+        session.inline_notice = ''
+        session.touch()
 
     async def rebuild_mux_plan(self, chat_id: int, owner_user_id: int) -> tuple[AssMuxSession, str]:
         session = self.get_mux_session(chat_id, owner_user_id)

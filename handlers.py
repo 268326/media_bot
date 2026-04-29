@@ -33,14 +33,8 @@ from config import (
 )
 from ass_formatter import (
     format_mux_running,
-    format_rescan_notice,
     format_rescan_running,
     format_subset_running,
-    prompt_default_group_text,
-    prompt_default_lang_text,
-    prompt_sub_file_text,
-    prompt_track_group_text,
-    prompt_track_lang_text,
 )
 from ass_service import (
     ass_service,
@@ -678,8 +672,6 @@ async def sync_ass_mux_view(bot, chat_id: int, user_id: int):
 
     panel_text = await ass_service.build_mux_panel_text(chat_id, user_id)
     panel_kb = ass_service.build_mux_plan_keyboard(chat_id, user_id)
-    preview_text = await ass_service.build_mux_preview_text(chat_id, user_id)
-    preview_kb = ass_service.build_mux_preview_keyboard(chat_id, user_id)
 
     if session.awaiting_message_id:
         try:
@@ -688,18 +680,6 @@ async def sync_ass_mux_view(bot, chat_id: int, user_id: int):
                 message_id=session.awaiting_message_id,
                 text=panel_text,
                 reply_markup=panel_kb,
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
-
-    if session.preview_message_id:
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=session.preview_message_id,
-                text=preview_text,
-                reply_markup=preview_kb,
                 parse_mode="HTML",
             )
         except Exception:
@@ -1205,12 +1185,10 @@ async def callback_ass_menu(callback: CallbackQuery):
             panel_text = await ass_service.build_mux_panel_text(msg.chat.id, callback.from_user.id)
             kb = ass_service.build_mux_plan_keyboard(msg.chat.id, callback.from_user.id)
             await msg.edit_text(panel_text, reply_markup=kb, parse_mode="HTML")
-            preview_msg = await msg.answer("🎞️ <b>计划预览 · 总览</b>\n\n尚未生成计划。", parse_mode="HTML")
             ass_service.bind_mux_message_ids(
                 msg.chat.id,
                 callback.from_user.id,
                 panel_message_id=msg.message_id,
-                preview_message_id=preview_msg.message_id,
             )
             await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
         except Exception as exc:
@@ -1261,46 +1239,25 @@ async def callback_ass_mux(callback: CallbackQuery):
         if payload == "prompt_group":
             session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
             ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="default_group", message_id=session.awaiting_message_id if session and session.awaiting_message_id else msg.message_id)
-            await callback.answer("请发送默认字幕组")
-            prompt = await msg.answer(
-                prompt_default_group_text(),
-                parse_mode="HTML",
-            )
-            try:
-                await asyncio.sleep(20)
-                await prompt.delete()
-            except Exception:
-                pass
+            ass_service.clear_mux_inline_notice(msg.chat.id, callback.from_user.id)
+            await callback.answer("请直接发送默认字幕组")
+            await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
             return
 
         if payload == "prompt_lang":
             session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
             ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="default_lang", message_id=session.awaiting_message_id if session and session.awaiting_message_id else msg.message_id)
-            await callback.answer("请发送默认语言")
-            prompt = await msg.answer(
-                prompt_default_lang_text(),
-                parse_mode="HTML",
-            )
-            try:
-                await asyncio.sleep(20)
-                await prompt.delete()
-            except Exception:
-                pass
+            ass_service.clear_mux_inline_notice(msg.chat.id, callback.from_user.id)
+            await callback.answer("请直接发送默认语言")
+            await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
             return
 
         if payload == "refresh":
-            prompt = await msg.answer(
-                format_rescan_notice(),
-                parse_mode="HTML",
-            )
+            ass_service.set_mux_inline_notice(msg.chat.id, callback.from_user.id, '🔄 <b>重新扫描中…</b> 正在刷新目录和计划')
             await msg.edit_text(format_rescan_running(), parse_mode="HTML")
             session, preview = await ass_service.rebuild_mux_plan(msg.chat.id, callback.from_user.id)
+            ass_service.set_mux_inline_notice(msg.chat.id, callback.from_user.id, '✅ <b>已重新扫描</b> 如修改了默认字幕组/语言，新计划已生效。')
             await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
-            try:
-                await asyncio.sleep(8)
-                await prompt.delete()
-            except Exception:
-                pass
             return
 
         if payload.startswith("preview:"):
@@ -1343,6 +1300,7 @@ async def callback_ass_mux(callback: CallbackQuery):
         if payload.startswith("edit_item:"):
             _, index_raw = payload.split(":", 1)
             item_index = int(index_raw)
+            ass_service.clear_mux_inline_notice(msg.chat.id, callback.from_user.id)
             await callback.answer("打开条目编辑")
             text = ass_service.format_mux_item_detail(msg.chat.id, callback.from_user.id, item_index)
             kb = ass_service.build_mux_item_keyboard(msg.chat.id, callback.from_user.id, item_index)
@@ -1355,15 +1313,9 @@ async def callback_ass_mux(callback: CallbackQuery):
             sub_index = int(sub_raw)
             session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
             ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="sub_file", item_index=item_index, sub_index=sub_index, message_id=session.awaiting_message_id if session and session.awaiting_message_id else msg.message_id)
-            prompt = await msg.answer(
-                prompt_sub_file_text(),
-                parse_mode="HTML",
-            )
-            try:
-                await asyncio.sleep(20)
-                await prompt.delete()
-            except Exception:
-                pass
+            ass_service.clear_mux_inline_notice(msg.chat.id, callback.from_user.id)
+            await callback.answer("请直接发送新的字幕文件名")
+            await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
             return
 
         if payload.startswith("prompt_subgroup:"):
@@ -1372,16 +1324,9 @@ async def callback_ass_mux(callback: CallbackQuery):
             sub_index = int(sub_raw)
             session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
             ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="track_group", item_index=item_index, sub_index=sub_index, message_id=session.awaiting_message_id if session and session.awaiting_message_id else msg.message_id)
-            await callback.answer("请发送字幕组")
-            prompt = await msg.answer(
-                prompt_track_group_text(),
-                parse_mode="HTML",
-            )
-            try:
-                await asyncio.sleep(20)
-                await prompt.delete()
-            except Exception:
-                pass
+            ass_service.clear_mux_inline_notice(msg.chat.id, callback.from_user.id)
+            await callback.answer("请直接发送字幕组")
+            await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
             return
 
         if payload.startswith("prompt_sublang:"):
@@ -1390,25 +1335,27 @@ async def callback_ass_mux(callback: CallbackQuery):
             sub_index = int(sub_raw)
             session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
             ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="track_lang", item_index=item_index, sub_index=sub_index, message_id=session.awaiting_message_id if session and session.awaiting_message_id else msg.message_id)
-            await callback.answer("请发送字幕语言")
-            prompt = await msg.answer(
-                prompt_track_lang_text(),
-                parse_mode="HTML",
-            )
-            try:
-                await asyncio.sleep(20)
-                await prompt.delete()
-            except Exception:
-                pass
+            ass_service.clear_mux_inline_notice(msg.chat.id, callback.from_user.id)
+            await callback.answer("请直接发送字幕语言")
+            await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
+            return
+
+        if payload == "cancel_prompt":
+            ass_service.clear_mux_prompt(msg.chat.id, callback.from_user.id)
+            ass_service.set_mux_inline_notice(msg.chat.id, callback.from_user.id, 'ℹ️ 已取消当前输入。')
+            await callback.answer("已取消当前输入")
+            await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
             return
 
         if payload == "back_plan":
             ass_service.clear_mux_prompt(msg.chat.id, callback.from_user.id)
+            ass_service.clear_mux_inline_notice(msg.chat.id, callback.from_user.id)
             await callback.answer("返回计划列表")
             await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
             return
 
         if payload == "run_confirm":
+            ass_service.clear_mux_inline_notice(msg.chat.id, callback.from_user.id)
             await callback.answer("请确认是否执行")
             text = ass_service.format_mux_run_confirm(msg.chat.id, callback.from_user.id)
             kb = ass_service.build_mux_run_confirm_keyboard()
@@ -1425,37 +1372,14 @@ async def callback_ass_mux(callback: CallbackQuery):
             prefix = "✅" if ok else "❌"
             try:
                 await msg.edit_text(text, parse_mode="HTML")
-                session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
-                if session and session.preview_message_id:
-                    try:
-                        await callback.bot.edit_message_text(
-                            chat_id=msg.chat.id,
-                            message_id=session.preview_message_id,
-                            text="✅ 预览已锁定，本次任务已开始执行。",
-                            parse_mode="HTML",
-                        )
-                    except Exception:
-                        pass
             except Exception:
                 await msg.answer(f"{prefix} 字幕内封任务已完成，请查看机器人日志/汇总消息", parse_mode="HTML")
             return
 
         if payload == "cancel":
-            session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
-            preview_message_id = session.preview_message_id if session else None
             ass_service.clear_mux_session(msg.chat.id, callback.from_user.id)
             await callback.answer("已结束本次会话")
             await msg.edit_text("❎ 已结束本次 /ass 字幕内封会话。", parse_mode="HTML")
-            if preview_message_id:
-                try:
-                    await callback.bot.edit_message_text(
-                        chat_id=msg.chat.id,
-                        message_id=preview_message_id,
-                        text="❎ 该预览已随本次 /ass 会话结束。",
-                        parse_mode="HTML",
-                    )
-                except Exception:
-                    pass
             return
 
         await callback.answer()
@@ -1944,11 +1868,12 @@ async def handle_direct_link(message: Message):
     if session and session.awaiting_field and message.from_user.id == session.owner_user_id and message.text and not text.startswith('/'):
         try:
             result_text = ass_service.apply_mux_text_input(message.chat.id, message.from_user.id, text)
-            await message.reply(result_text, parse_mode="HTML")
+            ass_service.set_mux_inline_notice(message.chat.id, message.from_user.id, result_text)
             await sync_ass_mux_view(message.bot, message.chat.id, message.from_user.id)
         except Exception as exc:
             logging.exception("❌ 处理 /ass 字幕内封输入失败")
-            await message.reply(f"❌ 输入无效\n\n<code>{html.escape(str(exc))}</code>", parse_mode="HTML")
+            ass_service.set_mux_inline_notice(message.chat.id, message.from_user.id, f"❌ <b>输入无效</b>\n\n<code>{html.escape(str(exc))}</code>")
+            await sync_ass_mux_view(message.bot, message.chat.id, message.from_user.id)
         return
 
     # 如果是命令，跳过（由其他handler处理）

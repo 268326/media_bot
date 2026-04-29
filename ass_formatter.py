@@ -82,11 +82,13 @@ def format_mux_session(session: Any) -> str:
     if session.plan:
         page_size = 8
         total_pages = max(1, (len(session.plan.items) + page_size - 1) // page_size)
+        preview_mode = '总览' if session.preview_mode == 'summary' else '列表'
         lines.extend([
             '',
             f'📊 计划: <code>{len(session.plan.items)}</code> 集 / <code>{session.plan.total_sub_tracks}</code> 条字幕轨',
             f'🧭 编辑页: <code>{session.plan_page + 1}</code>/<code>{total_pages}</code>',
-            '👆 轻触数字进入单集编辑；预览请看下方独立消息。',
+            f'👀 预览: <code>{preview_mode}</code> · 同面板显示',
+            '👆 轻触数字进入单集编辑。',
         ])
     else:
         lines.extend(['', '📭 还没有计划，先点“重新扫描”。'])
@@ -94,7 +96,7 @@ def format_mux_session(session: Any) -> str:
 
 
 def format_mux_preview_summary(session: Any) -> str:
-    total_items = len(session.plan.items)
+    total_items = session.plan.total_items if hasattr(session.plan, 'total_items') else len(session.plan.items)
     total_tracks = session.plan.total_sub_tracks
     lines = [
         '🎞️ <b>计划预览 · 总览</b>',
@@ -105,15 +107,13 @@ def format_mux_preview_summary(session: Any) -> str:
         f'🏷️ 默认字幕组: <code>{html.escape(session.default_group or "-")}</code>',
         f'⚙️ 并发: <code>{session.settings.jobs}</code> · 🧪 DRY: <code>{session.dry_run}</code>',
         f'🗑️ 删除外挂字幕: <code>{session.delete_external_subs}</code>',
-        '',
-        '<blockquote>点击主面板里的“展开列表”再看分项文件列表。</blockquote>',
     ]
     return join_lines_for_tg(lines)
 
 
 def format_mux_preview_list(
     session: Any,
-    current_items: list[tuple[int, Any]],
+    current_items: list[Any],
     *,
     current_page: int,
     total_pages: int,
@@ -129,12 +129,22 @@ def format_mux_preview_list(
         f'范围: <code>{start_no}</code>-<code>{end_no}</code> · 总字幕轨 <code>{total_tracks}</code>',
         '',
     ]
-    for index, item in current_items:
-        title = item.get("display_title") if isinstance(item, dict) else None
-        ep = item.get("display_ep") if isinstance(item, dict) else None
-        item_obj = item.get("item") if isinstance(item, dict) else item[1]
-        title = title or Path(item_obj.mkv).stem
-        ep = ep or ''
+    for entry in current_items:
+        if isinstance(entry, dict):
+            index = int(entry.get('index', 0) or 0)
+            item_obj = entry.get('item')
+            title = entry.get('display_title')
+            ep = entry.get('display_ep')
+        else:
+            index, item_obj = entry
+            title = None
+            ep = ''
+
+        if item_obj is None:
+            continue
+
+        title = str(title or Path(item_obj.mkv).stem)
+        ep = str(ep or '')
         lines.append(f'<blockquote>\n<b>{index + 1}. {html.escape(title)}</b> {html.escape(ep)}\n<code>{html.escape(Path(item_obj.mkv).name)}</code>')
         for sub_idx, sub in enumerate(item_obj.subs, 1):
             lines.append(
@@ -173,6 +183,15 @@ def build_mux_plan_keyboard(session: Any, current_items: list[tuple[int, Any]], 
         InlineKeyboardButton(text='📋 预览总览', callback_data=f'{mux_prefix}preview:summary'),
         InlineKeyboardButton(text='📄 展开列表', callback_data=f'{mux_prefix}preview:list'),
     ])
+    if session.preview_mode == 'list' and session.plan and max(1, (len(session.plan.items) + 4 - 1) // 4) > 1:
+        preview_total_pages = max(1, (len(session.plan.items) + 4 - 1) // 4)
+        nav_row: list[InlineKeyboardButton] = []
+        if session.preview_page > 0:
+            nav_row.append(InlineKeyboardButton(text='⬅️ 列表', callback_data=f'{mux_prefix}preview_page:{session.preview_page - 1}'))
+        nav_row.append(InlineKeyboardButton(text=f'列表 {session.preview_page + 1}/{preview_total_pages}', callback_data=f'{mux_prefix}preview_page:{session.preview_page}'))
+        if session.preview_page < preview_total_pages - 1:
+            nav_row.append(InlineKeyboardButton(text='列表 ➡️', callback_data=f'{mux_prefix}preview_page:{session.preview_page + 1}'))
+        rows.append(nav_row)
     rows.append([
         InlineKeyboardButton(text=f'🗑️ 外挂字幕: {"开" if session.delete_external_subs else "关"}', callback_data=f'{mux_prefix}toggle_delete'),
         InlineKeyboardButton(text=f'🧪 DRY: {"开" if session.dry_run else "关"}', callback_data=f'{mux_prefix}toggle_dry'),
@@ -181,6 +200,10 @@ def build_mux_plan_keyboard(session: Any, current_items: list[tuple[int, Any]], 
         InlineKeyboardButton(text='✏️ 默认字幕组', callback_data=f'{mux_prefix}prompt_group'),
         InlineKeyboardButton(text='🌐 默认语言', callback_data=f'{mux_prefix}prompt_lang'),
     ])
+    if session.awaiting_field:
+        rows.append([
+            InlineKeyboardButton(text='❎ 取消当前输入', callback_data=f'{mux_prefix}cancel_prompt'),
+        ])
     action_row = [InlineKeyboardButton(text='🔄 重新扫描', callback_data=f'{mux_prefix}refresh')]
     if session.plan:
         action_row.append(InlineKeyboardButton(text='▶️ 开始执行', callback_data=f'{mux_prefix}run_confirm'))
@@ -194,6 +217,10 @@ def build_mux_preview_keyboard(session: Any, total_pages: int, mux_prefix: str) 
         InlineKeyboardButton(text='📋 总览', callback_data=f'{mux_prefix}preview:summary'),
         InlineKeyboardButton(text='📄 列表', callback_data=f'{mux_prefix}preview:list'),
     ]]
+    if session.awaiting_field:
+        rows.append([
+            InlineKeyboardButton(text='❎ 取消当前输入', callback_data=f'{mux_prefix}cancel_prompt'),
+        ])
     if session.plan and session.preview_mode == 'list' and total_pages > 1:
         nav_row: list[InlineKeyboardButton] = []
         if session.preview_page > 0:
@@ -285,29 +312,28 @@ def format_mux_item_detail(item: Any, item_index: int) -> str:
 
 def format_default_group_updated(group: str) -> str:
     return (
-        '✅ <b>默认字幕组已更新</b>\n\n'
-        f'🏷️ 当前值: <code>{html.escape(group or "-")}</code>\n'
-        '💡 请返回主面板并点击“重新扫描”使其生效。'
+        '✅ <b>默认字幕组已更新</b> '
+        f'<code>{html.escape(group or "-")}</code>\n'
+        '💡 重新扫描后生效。'
     )
 
 
 def format_default_lang_updated(lang: str) -> str:
     return (
-        '✅ <b>默认语言已更新</b>\n\n'
-        f'🌐 当前值: <code>{html.escape(lang)}</code>\n'
-        '💡 请返回主面板并点击“重新扫描”使其生效。'
+        '✅ <b>默认语言已更新</b> '
+        f'<code>{html.escape(lang)}</code>\n'
+        '💡 重新扫描后生效。'
     )
 
 
 def format_sub_file_updated(path_text: str) -> str:
-    return '✅ <b>字幕文件已更新</b>\n\n' f'📄 当前文件: <code>{html.escape(path_text)}</code>'
+    return '✅ <b>字幕文件已更新</b> ' f'<code>{html.escape(path_text)}</code>'
 
 
 def format_track_group_updated(track_name: str, mkv_lang: str) -> str:
     return (
-        '✅ <b>字幕组已更新</b>\n\n'
-        f'🏷️ 轨道名: <code>{html.escape(track_name)}</code>\n'
-        f'🌐 语言: <code>{html.escape(mkv_lang)}</code>'
+        '✅ <b>字幕组已更新</b> '
+        f'<code>{html.escape(track_name)}</code> · <code>{html.escape(mkv_lang)}</code>'
     )
 
 
@@ -431,9 +457,8 @@ def format_subset_error(exc_text: str) -> str:
 
 def format_track_lang_updated(track_name: str, mkv_lang: str) -> str:
     return (
-        '✅ <b>字幕语言已更新</b>\n\n'
-        f'🏷️ 轨道名: <code>{html.escape(track_name)}</code>\n'
-        f'🌐 语言: <code>{html.escape(mkv_lang)}</code>'
+        '✅ <b>字幕语言已更新</b> '
+        f'<code>{html.escape(track_name)}</code> · <code>{html.escape(mkv_lang)}</code>'
     )
 
 
