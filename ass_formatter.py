@@ -200,6 +200,9 @@ def build_mux_plan_keyboard(session: Any, current_items: list[tuple[int, Any]], 
         InlineKeyboardButton(text='✏️ 默认字幕组', callback_data=f'{mux_prefix}prompt_group'),
         InlineKeyboardButton(text='🌐 默认语言', callback_data=f'{mux_prefix}prompt_lang'),
     ])
+    rows.append([
+        InlineKeyboardButton(text=f'⚙️ 并发数: {session.settings.jobs}', callback_data=f'{mux_prefix}prompt_jobs'),
+    ])
     if session.awaiting_field:
         rows.append([
             InlineKeyboardButton(text='❎ 取消当前输入', callback_data=f'{mux_prefix}cancel_prompt'),
@@ -326,6 +329,14 @@ def format_default_lang_updated(lang: str) -> str:
     )
 
 
+def format_jobs_updated(jobs: int) -> str:
+    return (
+        '✅ <b>并发数已更新</b> '
+        f'<code>{jobs}</code>\n'
+        '💡 新并发数将用于本次会话后续执行。'
+    )
+
+
 def format_sub_file_updated(path_text: str) -> str:
     return '✅ <b>字幕文件已更新</b> ' f'<code>{html.escape(path_text)}</code>'
 
@@ -390,12 +401,15 @@ def format_subset_running() -> str:
     )
 
 
-def format_mux_running() -> str:
+def format_mux_running(*, processed: int = 0, total: int | None = None, dry_run: bool = False) -> str:
+    total_text = str(total if total is not None else '?')
     return (
         '🎞️ <b>/ass · 字幕内封执行中</b>\n'
         '─────────────────\n\n'
+        f'📈 进度: <code>{processed}</code>/<code>{total_text}</code>（已内封视频/总视频）\n'
         '⏳ 正在调用 <code>mkvmerge</code> 执行计划…\n'
-        '💡 详细过程请查看 Docker 日志。'
+        + ('🧪 当前为 DRY-RUN，仅模拟执行，不会写回文件。\n' if dry_run else '')
+        + '💡 详细过程请查看 Docker 日志。'
     )
 
 

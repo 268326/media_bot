@@ -9,6 +9,7 @@ import aiohttp
 import html
 import os
 import time
+import contextlib
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import (
@@ -36,6 +37,7 @@ from ass_formatter import (
     format_rescan_running,
     format_subset_running,
 )
+from ass_mux_pipeline import MuxProgressEvent
 from ass_service import (
     ass_service,
     ASS_MENU_PREFIX,
@@ -686,6 +688,34 @@ async def sync_ass_mux_view(bot, chat_id: int, user_id: int):
             pass
 
 
+async def pump_ass_mux_progress(bot, chat_id: int, message_id: int, session, progress_queue: asyncio.Queue[MuxProgressEvent | None]):
+    last_processed = 0
+    last_total = len(session.plan.items) if session.plan else 0
+    while True:
+        event = await progress_queue.get()
+        if event is None:
+            return
+        last_processed = max(0, int(event.processed))
+        last_total = max(last_processed, int(event.total))
+        current_file = html.escape(event.current_file or "")
+        text = format_mux_running(
+            processed=last_processed,
+            total=last_total,
+            dry_run=bool(session.dry_run),
+        )
+        if current_file:
+            text += f"\n📝 当前完成: <code>{current_file}</code>"
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                parse_mode="HTML",
+            )
+        except Exception as exc:
+            logging.debug("更新 /ass 字幕内封进度消息失败: %s", exc)
+
+
 @router.message(Command("strm_status"))
 async def cmd_strm_status(message: Message):
     if not await check_user_permission(message):
@@ -1252,6 +1282,14 @@ async def callback_ass_mux(callback: CallbackQuery):
             await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
             return
 
+        if payload == "prompt_jobs":
+            session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
+            ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="jobs", message_id=session.awaiting_message_id if session and session.awaiting_message_id else msg.message_id)
+            ass_service.clear_mux_inline_notice(msg.chat.id, callback.from_user.id)
+            await callback.answer("请直接发送并发数")
+            await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
+            return
+
         if payload == "refresh":
             ass_service.set_mux_inline_notice(msg.chat.id, callback.from_user.id, '🔄 <b>重新扫描中…</b> 正在刷新目录和计划')
             await msg.edit_text(format_rescan_running(), parse_mode="HTML")
@@ -1363,12 +1401,39 @@ async def callback_ass_mux(callback: CallbackQuery):
             return
 
         if payload == "run_now":
+            session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
+            if not session or not session.plan:
+                raise RuntimeError("当前会话已失效，请重新发送 /ass")
+            total_items = len(session.plan.items)
+            progress_queue: asyncio.Queue[MuxProgressEvent | None] = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+
+            def progress_callback(event: MuxProgressEvent) -> None:
+                loop.call_soon_threadsafe(progress_queue.put_nowait, event)
+
             await callback.answer("开始执行字幕内封…")
             await msg.edit_text(
-                format_mux_running(),
+                format_mux_running(
+                    processed=0,
+                    total=total_items,
+                    dry_run=bool(session.dry_run),
+                ),
                 parse_mode="HTML",
             )
-            ok, text = await ass_service.run_mux(callback.bot, msg.chat.id, callback.from_user.id)
+            pump_task = asyncio.create_task(
+                pump_ass_mux_progress(callback.bot, msg.chat.id, msg.message_id, session, progress_queue)
+            )
+            try:
+                ok, text = await ass_service.run_mux(
+                    callback.bot,
+                    msg.chat.id,
+                    callback.from_user.id,
+                    progress_callback=progress_callback,
+                )
+            finally:
+                await progress_queue.put(None)
+                with contextlib.suppress(Exception):
+                    await pump_task
             prefix = "✅" if ok else "❌"
             try:
                 await msg.edit_text(text, parse_mode="HTML")

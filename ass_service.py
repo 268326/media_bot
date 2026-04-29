@@ -6,6 +6,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from aiogram import Bot
 from aiogram.types import Message, InlineKeyboardMarkup
@@ -18,6 +19,7 @@ from ass_formatter import (
     build_mux_run_confirm_keyboard,
     format_default_group_updated,
     format_default_lang_updated,
+    format_jobs_updated,
     format_mux_error,
     format_mux_item_detail,
     format_mux_menu,
@@ -36,7 +38,7 @@ from ass_formatter import (
 
 from ass_config import load_ass_settings_from_env
 from ass_mux_config import AssMuxSettings, load_ass_mux_settings_from_env
-from ass_mux_pipeline import collect_mux_plan_stats, fmt_bytes, run_mux_plan
+from ass_mux_pipeline import collect_mux_plan_stats, fmt_bytes, run_mux_plan, MuxProgressEvent
 from ass_mux_planner import (
     MuxPlan,
     MuxPlanItem,
@@ -253,6 +255,8 @@ class AssService:
             return '✏️ <b>当前等待输入：默认字幕组</b>\n• 直接发送文字 = 设置字幕组\n• 发送 <code>-</code> = 清空字幕组\n• 输入后请点“重新扫描”生效'
         if field == 'default_lang':
             return '🌐 <b>当前等待输入：默认语言</b>\n请输入例如：<code>chs</code> / <code>cht</code> / <code>eng</code> / <code>chs_eng</code>\n• 输入后请点“重新扫描”生效'
+        if field == 'jobs':
+            return '⚙️ <b>当前等待输入：并发数</b>\n请输入正整数，例如：<code>1</code> / <code>2</code> / <code>4</code>\n• 修改后立即用于本次会话执行'
         if field == 'sub_file':
             return '📄 <b>当前等待输入：字幕文件名</b>\n请输入新的字幕文件名（只输入文件名，不要带路径）'
         if field == 'track_group':
@@ -430,6 +434,20 @@ class AssService:
             self.clear_mux_prompt(chat_id, owner_user_id)
             return format_default_lang_updated(session.default_lang)
 
+        if field == 'jobs':
+            if not raw:
+                raise AssPipelineError('并发数不能为空，例如 1 / 2 / 4')
+            try:
+                jobs = int(raw)
+            except ValueError as exc:
+                raise AssPipelineError('并发数必须是正整数，例如 1 / 2 / 4') from exc
+            if jobs < 1:
+                raise AssPipelineError('并发数最小为 1')
+            session.settings.jobs = jobs
+            self.clear_mux_prompt(chat_id, owner_user_id)
+            session.touch()
+            return format_jobs_updated(session.settings.jobs)
+
         item, sub = self._resolve_track(session)
 
         if field == 'sub_file':
@@ -476,7 +494,14 @@ class AssService:
 
         raise AssPipelineError('未知输入字段，请重新发送 /ass')
 
-    async def run_mux(self, bot: Bot, chat_id: int, owner_user_id: int) -> tuple[bool, str]:
+    async def run_mux(
+        self,
+        bot: Bot,
+        chat_id: int,
+        owner_user_id: int,
+        *,
+        progress_callback: Callable[[MuxProgressEvent], None] | None = None,
+    ) -> tuple[bool, str]:
         session = self.get_mux_session(chat_id, owner_user_id)
         if not session:
             raise AssPipelineError('当前没有进行中的字幕内封会话，请重新发送 /ass')
@@ -496,6 +521,7 @@ class AssService:
                 session.plan,
                 dry_run=session.dry_run,
                 delete_external_subs=session.delete_external_subs,
+                progress_callback=progress_callback,
             )
             text = format_mux_summary(summary)
             await self._notify(bot, chat_id, session.settings.notify_chat_id, text)

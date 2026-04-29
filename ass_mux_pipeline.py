@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
+from typing import Callable
 
 from ass_mux_config import AssMuxSettings
 from ass_mux_planner import MuxPlan, MuxPlanItem, infer_lang_raw_from_subtitle_name, mux_plan_from_dict
@@ -46,6 +47,14 @@ class MuxRunSummary:
     deleted_external_subs_count: int
     duration_s: float
     failures: list[str]
+
+
+@dataclass(slots=True)
+class MuxProgressEvent:
+    processed: int
+    total: int
+    current_file: str = ""
+    ok: bool = True
 
 
 @dataclass(slots=True)
@@ -372,6 +381,8 @@ def process_one_item(
     processed_counter: list[int],
     processed_lock: threading.Lock,
     *,
+    total_items: int,
+    progress_callback: Callable[[MuxProgressEvent], None] | None,
     dry_run: bool,
     delete_external_subs: bool,
 ) -> int:
@@ -458,6 +469,17 @@ def process_one_item(
         _log(prefix, f"✅ DRY OK: {mkv_path.name}")
         with processed_lock:
             processed_counter[0] += 1
+            current_processed = processed_counter[0]
+        if progress_callback is not None:
+            try:
+                progress_callback(MuxProgressEvent(
+                    processed=current_processed,
+                    total=total_items,
+                    current_file=mkv_path.name,
+                    ok=True,
+                ))
+            except Exception:
+                logger.debug("更新 /ass DRY-RUN 进度回调失败", exc_info=True)
         return 0
 
     if stop_event.is_set():
@@ -483,6 +505,17 @@ def process_one_item(
 
     with processed_lock:
         processed_counter[0] += 1
+        current_processed = processed_counter[0]
+    if progress_callback is not None:
+        try:
+            progress_callback(MuxProgressEvent(
+                processed=current_processed,
+                total=total_items,
+                current_file=mkv_path.name,
+                ok=True,
+            ))
+        except Exception:
+            logger.debug("更新 /ass 字幕内封进度回调失败", exc_info=True)
     return 0
 
 
@@ -574,6 +607,7 @@ def run_mux_plan(
     *,
     dry_run: bool,
     delete_external_subs: bool | None = None,
+    progress_callback: Callable[[MuxProgressEvent], None] | None = None,
 ) -> MuxRunSummary:
     if not shutil.which(settings.mkvmerge_bin):
         raise AssPipelineError(f"未找到 mkvmerge: {settings.mkvmerge_bin}")
@@ -648,6 +682,8 @@ def run_mux_plan(
                 failures_lock,
                 processed_counter,
                 processed_lock,
+                total_items=len(normalized.items),
+                progress_callback=progress_callback,
                 dry_run=dry_run,
                 delete_external_subs=delete_subs,
             )
