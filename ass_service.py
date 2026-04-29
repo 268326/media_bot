@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import html
 import logging
 import threading
 import time
@@ -9,11 +8,34 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from aiogram import Bot
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import Message, InlineKeyboardMarkup
+
+from ass_formatter import (
+    build_mux_item_keyboard,
+    build_mux_menu_keyboard,
+    build_mux_plan_keyboard,
+    build_mux_preview_keyboard,
+    build_mux_run_confirm_keyboard,
+    format_default_group_updated,
+    format_default_lang_updated,
+    format_mux_error,
+    format_mux_item_detail,
+    format_mux_menu,
+    format_mux_preview_list,
+    format_mux_preview_summary,
+    format_mux_run_confirm,
+    format_mux_session,
+    format_mux_summary,
+    format_sub_file_updated,
+    format_subset_error,
+    format_subset_summary,
+    format_track_group_updated,
+    format_track_lang_updated,
+)
 
 from ass_config import load_ass_settings_from_env
 from ass_mux_config import AssMuxSettings, load_ass_mux_settings_from_env
-from ass_mux_pipeline import MuxRunSummary, collect_mux_plan_stats, fmt_bytes, run_mux_plan
+from ass_mux_pipeline import collect_mux_plan_stats, fmt_bytes, run_mux_plan
 from ass_mux_planner import (
     MuxPlan,
     MuxPlanItem,
@@ -25,7 +47,7 @@ from ass_mux_planner import (
     short_title_from_mkv,
     write_mux_plan,
 )
-from ass_pipeline import AssRunSummary, run_ass_pipeline
+from ass_pipeline import run_ass_pipeline
 from ass_utils import AssPipelineError
 
 logger = logging.getLogger(__name__)
@@ -47,6 +69,8 @@ class AssMuxSession:
     delete_external_subs: bool = False
     dry_run: bool = False
     plan_page: int = 0
+    preview_page: int = 0
+    preview_mode: str = "summary"
     selected_item_index: int | None = None
     selected_sub_index: int | None = None
     awaiting_field: str | None = None
@@ -73,35 +97,6 @@ class AssService:
     def _session_key(chat_id: int, owner_user_id: int) -> str:
         return f'{chat_id}:{owner_user_id}'
 
-    @staticmethod
-    def _join_lines_for_tg(
-        lines: list[str],
-        *,
-        limit: int = TG_TEXT_SAFE_LIMIT,
-        truncation_note: str = '… <i>内容过长，已自动截断。</i>',
-    ) -> str:
-        result: list[str] = []
-        total = 0
-        for line in lines:
-            extra = len(line) + (1 if result else 0)
-            if total + extra > limit:
-                break
-            result.append(line)
-            total += extra
-
-        if len(result) == len(lines):
-            return '\n'.join(result)
-
-        note_extra = len(truncation_note) + (1 if result else 0)
-        while result and total + note_extra > limit:
-            removed = result.pop()
-            total -= len(removed) + (1 if result else 0)
-            note_extra = len(truncation_note) + (1 if result else 0)
-        if not result and len(truncation_note) > limit:
-            return truncation_note[:limit]
-        result.append(truncation_note)
-        return '\n'.join(result)
-
     async def run_subset(self, bot: Bot, trigger_chat_id: int) -> tuple[bool, str]:
         acquired = self.lock.acquire(blocking=False)
         if not acquired:
@@ -111,13 +106,13 @@ class AssService:
         try:
             settings = load_ass_settings_from_env()
             summary = await asyncio.to_thread(run_ass_pipeline, settings)
-            text = self._format_subset_summary(summary)
+            text = format_subset_summary(summary)
             await self._notify(bot, trigger_chat_id, settings.notify_chat_id, text)
             return summary.failed == 0, text
         except Exception as exc:
             self.last_error = str(exc)
             logger.exception('❌ /ass 字体子集化执行失败')
-            text = f'❌ <b>/ass 字体子集化执行失败</b>\n\n<code>{html.escape(str(exc))}</code>'
+            text = format_subset_error(str(exc))
             await self._notify(bot, trigger_chat_id, load_ass_settings_from_env().notify_chat_id, text)
             return False, text
         finally:
@@ -126,22 +121,7 @@ class AssService:
 
     async def build_mux_menu(self, message: Message) -> tuple[str, InlineKeyboardMarkup]:
         settings = load_ass_mux_settings_from_env()
-        text = (
-            '🎬 <b>/ass 功能菜单</b>\n\n'
-            '请选择要执行的功能：\n'
-            '• <b>子集化字体</b>：扫描 ASS / 字体 / 压缩包，生成 <code>.assfonts.ass</code>\n'
-            '• <b>内封字幕</b>：把同目录匹配到的 <code>.ass/.sup</code> 内封进 <code>.mkv</code>\n\n'
-            f'字幕内封目录: <code>{html.escape(str(settings.target_dir))}</code>\n'
-            f'默认语言: <code>{html.escape(settings.default_lang)}</code>\n'
-            f'并发: <code>{settings.jobs}</code>'
-        )
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text='🔤 子集化字体', callback_data=f'{ASS_MENU_PREFIX}subset'),
-                InlineKeyboardButton(text='🎞️ 内封字幕', callback_data=f'{ASS_MENU_PREFIX}mux_start'),
-            ]
-        ])
-        return text, kb
+        return format_mux_menu(settings), build_mux_menu_keyboard(ASS_MENU_PREFIX)
 
     async def start_mux_session(self, *, chat_id: int, owner_user_id: int) -> AssMuxSession:
         self.cleanup_mux_sessions()
@@ -153,6 +133,8 @@ class AssService:
             default_group=settings.default_group,
             default_lang=settings.default_lang,
             delete_external_subs=settings.delete_external_subs_default,
+            preview_mode="summary",
+            preview_page=0,
         )
         self.mux_sessions[self._session_key(chat_id, owner_user_id)] = session
         logger.info('🎬 创建 /ass 字幕内封会话: chat_id=%s user_id=%s target=%s', chat_id, owner_user_id, settings.target_dir)
@@ -203,15 +185,14 @@ class AssService:
         if not session:
             raise AssPipelineError('当前没有进行中的字幕内封会话，请重新发送 /ass')
         session.touch()
-        return self._format_mux_session(session)
+        return format_mux_session(session)
 
     async def build_mux_panel_text(self, chat_id: int, owner_user_id: int) -> str:
         session = self.get_mux_session(chat_id, owner_user_id)
         if not session:
             raise AssPipelineError('当前没有进行中的字幕内封会话，请重新发送 /ass')
         session.touch()
-        lines = self._format_mux_session(session).split('\n')
-        return self._join_lines_for_tg(lines)
+        return format_mux_session(session)
 
 
     async def build_mux_preview_text(self, chat_id: int, owner_user_id: int) -> str:
@@ -222,25 +203,30 @@ class AssService:
         if not session.plan:
             return '🎞️ <b>计划预览</b>\n\n尚未生成计划。'
 
-        preview_lines = ['🎞️ <b>当前页计划预览</b>', '']
-        current_items = self._current_plan_page_items(session)
-        for index, item in current_items:
-            title = short_title_from_mkv(Path(item.mkv).name) or Path(item.mkv).stem
-            ep = short_ep_display(Path(item.mkv).name)
-            prefix = f'{index + 1}. {ep} {title}'.strip()
-            preview_lines.append(f'• <code>{html.escape(prefix)}</code>')
-            preview_lines.append(f'  ↳ MKV: <code>{html.escape(item.mkv)}</code>')
-            for sub_idx, sub in enumerate(item.subs, 1):
-                preview_lines.append(
-                    f'  ↳ 字幕{sub_idx}: <code>{html.escape(Path(sub.file).name)}</code> / '
-                    f'<code>{html.escape(sub.track_name)}</code> / <code>{html.escape(sub.mkv_lang)}</code>'
-                )
-            preview_lines.append('')
-        if not current_items:
-            preview_lines.append('• <code>当前页没有条目</code>')
-        return self._join_lines_for_tg(
-            preview_lines,
-            truncation_note='… <i>当前页预览过长，已自动截断；可继续翻页或进入单项编辑查看更多。</i>',
+        total_items = len(session.plan.items)
+        if session.preview_mode == 'summary':
+            return format_mux_preview_summary(session)
+
+        current_items: list[dict[str, object]] = []
+        for index, item in self._current_preview_page_items(session):
+            current_items.append({
+                'index': index,
+                'item': item,
+                'display_title': short_title_from_mkv(Path(item.mkv).name) or Path(item.mkv).stem,
+                'display_ep': short_ep_display(Path(item.mkv).name),
+            })
+        page_size = 4
+        total_pages = max(1, (total_items + page_size - 1) // page_size)
+        start_no = session.preview_page * page_size + 1 if current_items else 0
+        end_no = session.preview_page * page_size + len(current_items)
+        return format_mux_preview_list(
+            session,
+            current_items,
+            current_page=session.preview_page + 1,
+            total_pages=total_pages,
+            total_items=total_items,
+            start_no=start_no,
+            end_no=end_no,
         )
 
     async def rebuild_mux_plan(self, chat_id: int, owner_user_id: int) -> tuple[AssMuxSession, str]:
@@ -256,11 +242,23 @@ class AssService:
         )
         session.plan = plan
         session.plan_page = 0
+        session.preview_page = 0
+        session.preview_mode = "summary"
         write_mux_plan(plan, session.settings.plan_path.expanduser().resolve())
         logger.info('🎬 /ass 生成字幕内封计划: chat_id=%s items=%s tracks=%s plan=%s', chat_id, len(plan.items), plan.total_sub_tracks, session.settings.plan_path)
         text = format_mux_plan_preview(plan)
         return session, text
 
+
+    def _current_preview_page_items(self, session: AssMuxSession, *, page_size: int = 4) -> list[tuple[int, MuxPlanItem]]:
+        if not session.plan:
+            return []
+        total_items = len(session.plan.items)
+        total_pages = max(1, (total_items + page_size - 1) // page_size)
+        session.preview_page = min(max(session.preview_page, 0), total_pages - 1)
+        start = session.preview_page * page_size
+        end = min(start + page_size, total_items)
+        return [(index, session.plan.items[index]) for index in range(start, end)]
 
     def _current_plan_page_items(self, session: AssMuxSession, *, page_size: int = 8) -> list[tuple[int, MuxPlanItem]]:
         if not session.plan:
@@ -276,138 +274,40 @@ class AssService:
         session = self.get_mux_session(chat_id, owner_user_id)
         if not session:
             raise AssPipelineError('当前没有进行中的字幕内封会话，请重新发送 /ass')
+        current_items = self._current_plan_page_items(session) if session.plan else []
+        total_pages = max(1, (len(session.plan.items) + 8 - 1) // 8) if session.plan else 1
+        return build_mux_plan_keyboard(session, current_items, total_pages, ASS_MUX_PREFIX)
 
-        rows: list[list[InlineKeyboardButton]] = []
-        if session.plan:
-            current_items = self._current_plan_page_items(session)
-            for index, _item in current_items:
-                rows.append([
-                    InlineKeyboardButton(text=f'编辑 {index + 1}', callback_data=f'{ASS_MUX_PREFIX}edit_item:{index}')
-                ])
-
-            page_size = 8
-            total_items = len(session.plan.items)
-            total_pages = max(1, (total_items + page_size - 1) // page_size)
-            if total_pages > 1:
-                nav_row: list[InlineKeyboardButton] = []
-                if session.plan_page > 0:
-                    nav_row.append(InlineKeyboardButton(text='⬅️ 上一页', callback_data=f'{ASS_MUX_PREFIX}page:{session.plan_page - 1}'))
-                nav_row.append(InlineKeyboardButton(text=f'{session.plan_page + 1}/{total_pages}', callback_data=f'{ASS_MUX_PREFIX}page:{session.plan_page}'))
-                if session.plan_page < total_pages - 1:
-                    nav_row.append(InlineKeyboardButton(text='下一页 ➡️', callback_data=f'{ASS_MUX_PREFIX}page:{session.plan_page + 1}'))
-                rows.append(nav_row)
-
-        rows.append([
-            InlineKeyboardButton(text=f'删除外挂字幕: {"开" if session.delete_external_subs else "关"}', callback_data=f'{ASS_MUX_PREFIX}toggle_delete'),
-            InlineKeyboardButton(text=f'DRY-RUN: {"开" if session.dry_run else "关"}', callback_data=f'{ASS_MUX_PREFIX}toggle_dry'),
-        ])
-        rows.append([
-            InlineKeyboardButton(text='✏️ 改默认字幕组', callback_data=f'{ASS_MUX_PREFIX}prompt_group'),
-            InlineKeyboardButton(text='🌐 改默认语言', callback_data=f'{ASS_MUX_PREFIX}prompt_lang'),
-        ])
-        action_row = [InlineKeyboardButton(text='🔄 重新扫描生成计划', callback_data=f'{ASS_MUX_PREFIX}refresh')]
-        if session.plan:
-            action_row.append(InlineKeyboardButton(text='▶️ 开始执行', callback_data=f'{ASS_MUX_PREFIX}run_confirm'))
-        rows.append(action_row)
-        rows.append([
-            InlineKeyboardButton(text='❎ 结束本次会话', callback_data=f'{ASS_MUX_PREFIX}cancel')
-        ])
-        return InlineKeyboardMarkup(inline_keyboard=rows)
+    def build_mux_preview_keyboard(self, chat_id: int, owner_user_id: int) -> InlineKeyboardMarkup:
+        session = self.get_mux_session(chat_id, owner_user_id)
+        if not session:
+            raise AssPipelineError('当前没有进行中的字幕内封会话，请重新发送 /ass')
+        total_pages = max(1, (len(session.plan.items) + 4 - 1) // 4) if session.plan else 1
+        return build_mux_preview_keyboard(session, total_pages, ASS_MUX_PREFIX)
 
     def build_mux_item_keyboard(self, chat_id: int, owner_user_id: int, item_index: int) -> InlineKeyboardMarkup:
         session = self.get_mux_session(chat_id, owner_user_id)
         if not session or not session.plan:
             raise AssPipelineError('当前还没有生成计划')
         item = session.plan.items[item_index]
-        rows: list[list[InlineKeyboardButton]] = []
-        for sub_index, _sub in enumerate(item.subs, 1):
-            rows.append([
-                InlineKeyboardButton(text=f'改字幕 {sub_index} 文件', callback_data=f'{ASS_MUX_PREFIX}prompt_subfile:{item_index}:{sub_index - 1}'),
-            ])
-            rows.append([
-                InlineKeyboardButton(text=f'改字幕 {sub_index} 字幕组', callback_data=f'{ASS_MUX_PREFIX}prompt_subgroup:{item_index}:{sub_index - 1}'),
-                InlineKeyboardButton(text=f'改字幕 {sub_index} 语言', callback_data=f'{ASS_MUX_PREFIX}prompt_sublang:{item_index}:{sub_index - 1}'),
-            ])
-        rows.append([
-            InlineKeyboardButton(text='⬅️ 返回计划列表', callback_data=f'{ASS_MUX_PREFIX}back_plan')
-        ])
-        return InlineKeyboardMarkup(inline_keyboard=rows)
+        return build_mux_item_keyboard(item, item_index, ASS_MUX_PREFIX)
 
     def build_mux_run_confirm_keyboard(self) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text='▶️ 确认执行', callback_data=f'{ASS_MUX_PREFIX}run_now'),
-                InlineKeyboardButton(text='⬅️ 返回', callback_data=f'{ASS_MUX_PREFIX}back_plan'),
-            ]
-        ])
+        return build_mux_run_confirm_keyboard(ASS_MUX_PREFIX)
 
     def format_mux_run_confirm(self, chat_id: int, owner_user_id: int) -> str:
         session = self.get_mux_session(chat_id, owner_user_id)
         if not session or not session.plan:
             raise AssPipelineError('当前还没有生成计划')
         stats = collect_mux_plan_stats(session.settings, session.plan)
-        free_bytes = int(stats['tmp_free_bytes'])
-        total_bytes = int(stats['tmp_total_bytes'])
-        est_tmp = int(stats['estimated_tmp_bytes'])
-        total_source = int(stats['total_source_size_bytes'])
-        avg_source = int(stats['avg_source_size_bytes'])
-        max_source = int(stats['max_source_size_bytes'])
-        same_fs_count = int(stats['same_fs_count'])
-        missing_count = int(stats['missing_count'])
-        duplicate_subtitle_refs = int(stats['duplicate_subtitle_refs'])
-        temp_same_fs = bool(stats['temp_same_filesystem'])
-
-        lines = [
-            '⚠️ <b>确认执行字幕内封</b>',
-            '',
-            f'目录: <code>{html.escape(str(session.settings.target_dir))}</code>',
-            f'计划视频: <code>{len(session.plan.items)}</code>',
-            f'字幕轨道: <code>{session.plan.total_sub_tracks}</code>',
-            f'并发: <code>{session.settings.jobs}</code>',
-            f'DRY-RUN: <code>{session.dry_run}</code>',
-            f'删除外挂字幕: <code>{session.delete_external_subs}</code>',
-            f'超时保护: <code>标准模式</code>（空闲 <code>{session.settings.idle_timeout_s}s</code> / 软告警 <code>{session.settings.soft_warn_after_s}s</code> / 极限 <code>{session.settings.hard_cap_s}s</code>）',
-            '',
-            '<b>执行前资源评估：</b>',
-            f'源视频总大小: <code>{fmt_bytes(total_source)}</code>',
-            f'单集大小: 平均 <code>{fmt_bytes(avg_source)}</code> / 最大 <code>{fmt_bytes(max_source)}</code>',
-            f'预计临时占用: <code>{fmt_bytes(est_tmp)}</code>',
-            f'临时目录剩余: <code>{fmt_bytes(free_bytes)}</code>' + (f' / <code>{fmt_bytes(total_bytes)}</code>' if total_bytes > 0 else ''),
-            f'临时目录与视频同分区: <code>{temp_same_fs}</code> (<code>{same_fs_count}</code>/<code>{len(session.plan.items)}</code>)',
-        ]
-        if duplicate_subtitle_refs > 0:
-            lines.append(f'重复引用字幕文件: <code>{duplicate_subtitle_refs}</code>')
-        if missing_count > 0:
-            lines.append(f'缺失 MKV: <code>{missing_count}</code>')
-        if free_bytes > 0 and est_tmp > free_bytes:
-            lines.append('⚠️ <b>警告：</b> 临时目录剩余空间可能不足，建议先调小并发或修改临时目录。')
-        lines.extend(['', '确认后将开始调用 <code>mkvmerge</code> 写回视频文件。'])
-        return '\n'.join(lines)
+        return format_mux_run_confirm(session, stats, fmt_bytes)
 
     def format_mux_item_detail(self, chat_id: int, owner_user_id: int, item_index: int) -> str:
         session = self.get_mux_session(chat_id, owner_user_id)
         if not session or not session.plan:
             raise AssPipelineError('当前还没有生成计划')
         item = session.plan.items[item_index]
-        lines = [
-            f'📝 <b>编辑第 {item_index + 1} 项</b>',
-            '',
-            f'MKV: <code>{html.escape(item.mkv)}</code>',
-        ]
-        for idx, sub in enumerate(item.subs, 1):
-            lines.extend([
-                '',
-                f'<b>字幕 {idx}</b>',
-                f'文件: <code>{html.escape(sub.file)}</code>',
-                f'字幕组: <code>{html.escape(sub.group or "-")}</code>',
-                f'语言输入: <code>{html.escape(sub.lang_raw)}</code>',
-                f'轨道语言: <code>{html.escape(sub.mkv_lang)}</code>',
-                f'轨道名: <code>{html.escape(sub.track_name)}</code>',
-            ])
-        return self._join_lines_for_tg(
-            lines,
-            truncation_note='… <i>该条目详情过长，已自动截断；请继续修改单条字幕项查看。</i>',
-        )
+        return format_mux_item_detail(item, item_index)
 
     def list_mux_candidate_subs(self, chat_id: int, owner_user_id: int, item_index: int) -> list[str]:
         session = self.get_mux_session(chat_id, owner_user_id)
@@ -474,7 +374,7 @@ class AssService:
         if field == 'default_group':
             session.default_group = '' if raw == '-' else raw
             self.clear_mux_prompt(chat_id, owner_user_id)
-            return f'✅ 默认字幕组已更新为: <code>{html.escape(session.default_group or "-")}</code>\n请点击“重新扫描生成计划”使其生效。'
+            return format_default_group_updated(session.default_group)
 
         if field == 'default_lang':
             if not raw:
@@ -482,7 +382,7 @@ class AssService:
             self._parse_lang_or_raise(raw)
             session.default_lang = raw
             self.clear_mux_prompt(chat_id, owner_user_id)
-            return f'✅ 默认语言已更新为: <code>{html.escape(session.default_lang)}</code>\n请点击“重新扫描生成计划”使其生效。'
+            return format_default_lang_updated(session.default_lang)
 
         item, sub = self._resolve_track(session)
 
@@ -506,7 +406,7 @@ class AssService:
             sub.file = str(candidate)
             self.clear_mux_prompt(chat_id, owner_user_id)
             session.touch()
-            return f'✅ 字幕文件已更新为: <code>{html.escape(sub.file)}</code>'
+            return format_sub_file_updated(sub.file)
 
         if field == 'track_group':
             sub.group = '' if raw == '-' else raw
@@ -515,11 +415,7 @@ class AssService:
             sub.track_name = f'{sub.group} | {lang_cn}' if sub.group else lang_cn
             self.clear_mux_prompt(chat_id, owner_user_id)
             session.touch()
-            return (
-                '✅ 字幕组已更新\n'
-                f'轨道名: <code>{html.escape(sub.track_name)}</code>\n'
-                f'语言: <code>{html.escape(sub.mkv_lang)}</code>'
-            )
+            return format_track_group_updated(sub.track_name, sub.mkv_lang)
 
         if field == 'track_lang':
             if not raw:
@@ -530,11 +426,7 @@ class AssService:
             sub.track_name = f'{sub.group} | {lang_cn}' if sub.group else lang_cn
             self.clear_mux_prompt(chat_id, owner_user_id)
             session.touch()
-            return (
-                '✅ 字幕语言已更新\n'
-                f'轨道名: <code>{html.escape(sub.track_name)}</code>\n'
-                f'语言: <code>{html.escape(sub.mkv_lang)}</code>'
-            )
+            return format_track_lang_updated(sub.track_name, sub.mkv_lang)
 
         raise AssPipelineError('未知输入字段，请重新发送 /ass')
 
@@ -559,14 +451,14 @@ class AssService:
                 dry_run=session.dry_run,
                 delete_external_subs=session.delete_external_subs,
             )
-            text = self._format_mux_summary(summary)
+            text = format_mux_summary(summary)
             await self._notify(bot, chat_id, session.settings.notify_chat_id, text)
             self.clear_mux_session(chat_id, owner_user_id)
             return summary.failed == 0, text
         except Exception as exc:
             self.last_error = str(exc)
             logger.exception('❌ /ass 字幕内封执行失败')
-            text = f'❌ <b>/ass 字幕内封执行失败</b>\n\n<code>{html.escape(str(exc))}</code>'
+            text = format_mux_error(str(exc))
             await self._notify(bot, chat_id, load_ass_mux_settings_from_env().notify_chat_id, text)
             return False, text
         finally:
@@ -576,89 +468,17 @@ class AssService:
     async def _notify(self, bot: Bot, trigger_chat_id: int, notify_chat_id: str, text: str) -> None:
         target = str(notify_chat_id or '').strip()
         if not target:
+            logger.info('ℹ️ 跳过 /ass 汇总通知：未配置 notify_chat_id')
             return
         if target == str(trigger_chat_id):
+            logger.info('ℹ️ 跳过 /ass 汇总通知：notify_chat_id 与触发 chat 相同 (%s)', target)
             return
         try:
             await bot.send_message(chat_id=int(target), text=text, parse_mode='HTML')
+            logger.info('✅ /ass 汇总通知已发送: chat_id=%s', target)
         except Exception:
             logger.exception('⚠️ 发送 /ass 汇总通知失败: chat_id=%s', target)
 
-    def _format_subset_summary(self, summary: AssRunSummary) -> str:
-        prefix = '✅' if summary.failed == 0 else '⚠️'
-        lines = [
-            f'{prefix} <b>/ass 子集化字体执行完成</b>',
-            '',
-            f'目录: <code>{html.escape(summary.target_dir)}</code>',
-            f'总 ASS: <code>{summary.total_ass}</code>',
-            f'处理成功: <code>{summary.processed}</code>',
-            f'已跳过: <code>{summary.skipped}</code>',
-            f'失败: <code>{summary.failed}</code>',
-            f'字体目录: <code>{summary.font_dirs}</code>',
-            f'字体包: <code>{summary.archives}</code>',
-            f'OTF→TTF 成功: <code>{summary.converted_otf}</code>',
-            f'OTF 跳过: <code>{summary.skipped_otf}</code>',
-            f'耗时: <code>{summary.duration_s:.1f}s</code>',
-        ]
-        if summary.failures:
-            lines.extend(['', '<b>失败明细：</b>'])
-            for item in summary.failures[:10]:
-                lines.append(f'• <code>{html.escape(item)}</code>')
-            if len(summary.failures) > 10:
-                lines.append(f'• ... 其余 <code>{len(summary.failures) - 10}</code> 项已省略')
-        return '\n'.join(lines)
-
-    def _format_mux_session(self, session: AssMuxSession) -> str:
-        lines = [
-            '🎞️ <b>/ass 字幕内封设置</b>',
-            '',
-            f'目录: <code>{html.escape(str(session.settings.target_dir))}</code>',
-            f'递归扫描: <code>{session.settings.recursive}</code>',
-            f'默认字幕组: <code>{html.escape(session.default_group or "-")}</code>',
-            f'默认语言: <code>{html.escape(session.default_lang)}</code>',
-            f'并发: <code>{session.settings.jobs}</code>',
-            f'删除外挂字幕: <code>{session.delete_external_subs}</code>',
-            f'DRY-RUN: <code>{session.dry_run}</code>',
-            '',
-            '点击下方按钮生成计划、编辑条目并执行。',
-        ]
-        if session.plan:
-            page_size = 8
-            total_pages = max(1, (len(session.plan.items) + page_size - 1) // page_size)
-            lines.extend([
-                '',
-                f'当前计划: <code>{len(session.plan.items)}</code> 个视频 / <code>{session.plan.total_sub_tracks}</code> 条字幕轨道',
-                f'编辑页: <code>{session.plan_page + 1}</code>/<code>{total_pages}</code>',
-            ])
-        return '\n'.join(lines)
-
-    def _format_mux_summary(self, summary: MuxRunSummary) -> str:
-        prefix = '✅' if summary.failed == 0 else '⚠️'
-        lines = [
-            f'{prefix} <b>/ass 字幕内封执行完成</b>',
-            '',
-            f'目录: <code>{html.escape(summary.target_dir)}</code>',
-            f'临时目录: <code>{html.escape(summary.tmp_dir)}</code>',
-            f'计划文件: <code>{html.escape(summary.plan_path)}</code>',
-            f'总 MKV: <code>{summary.total_mkvs}</code>',
-            f'计划视频: <code>{summary.matched_mkvs}</code>',
-            f'字幕轨道: <code>{summary.total_sub_tracks}</code>',
-            f'处理成功: <code>{summary.processed}</code>',
-            f'失败: <code>{summary.failed}</code>',
-            f'并发: <code>{summary.jobs}</code>',
-            f'DRY-RUN: <code>{summary.dry_run}</code>',
-            f'删除外挂字幕: <code>{summary.delete_external_subs}</code>',
-            f'实际删除外挂字幕数: <code>{summary.deleted_external_subs_count}</code>',
-            f'重复引用字幕文件: <code>{summary.duplicate_subtitle_refs}</code>',
-            f'耗时: <code>{summary.duration_s:.1f}s</code>',
-        ]
-        if summary.failures:
-            lines.extend(['', '<b>失败明细：</b>'])
-            for item in summary.failures[:10]:
-                lines.append(f'• <code>{html.escape(item)}</code>')
-            if len(summary.failures) > 10:
-                lines.append(f'• ... 其余 <code>{len(summary.failures) - 10}</code> 项已省略')
-        return '\n'.join(lines)
 
 
 ass_service = AssService()

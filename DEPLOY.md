@@ -1,5 +1,9 @@
 # 部署与维护指南
 
+> 相关配套文档：
+> - 生产环境模板：[`PRODUCTION_ENV_TEMPLATE.md`](./PRODUCTION_ENV_TEMPLATE.md)
+> - 上线前回归清单：[`PRODUCTION_CHECKLIST.md`](./PRODUCTION_CHECKLIST.md)
+
 本项目为 Media Bot（HDHive Open API 方式），通过 `HDHIVE_API_KEY` 访问官方接口。
 
 ## 📦 环境准备
@@ -7,6 +11,7 @@
 本地运行需要：
 - Python 3.11+
 - pip
+- `pip install -r requirements.txt`（包含 `nest_asyncio` 等运行时依赖）
 
 Docker 运行可直接使用 `docker-compose.yml`。
 
@@ -27,7 +32,8 @@ HDHIVE_API_KEY=your_open_api_key_here
 可选项（按需填写）：
 ```env
 TMDB_API_KEY=
-ALLOWED_USER_ID=0
+bot_user_id=
+bot_chat_id=
 AUTO_UNLOCK_THRESHOLD=0
 HDHIVE_PARSE_INCOMING_LINKS=1
 CHECKIN_CRON=
@@ -64,24 +70,31 @@ nohup python main.py >/dev/null 2>&1 &
 
 ## 🐳 Docker 运行
 
-默认 `docker-compose.yml` 使用远程镜像 `ghcr.io/268326/media_bot:latest`。
+当前仓库内置的 `docker-compose.yml` 默认使用本地构建：`build: .`。
 
 ```bash
 cd /path/to/media_bot
-docker compose pull
-docker compose up -d
+docker compose up -d --build
 ```
 
-本地调试构建时：编辑 `docker-compose.yml`，注释 `image` 并启用 `build: .`，再执行：
+如需切回远程镜像，可手动把 compose 改为：
+
+```yaml
+image: ghcr.io/268326/media_bot:latest
+```
+
+然后执行：
 
 ```bash
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 查看日志：
 ```bash
 docker logs -f media_bot
 ```
+
 
 ## ✅ 功能验证
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
@@ -12,7 +13,7 @@ from pathlib import Path
 from queue import Empty, Queue
 
 from ass_mux_config import AssMuxSettings
-from ass_mux_planner import MuxPlan, MuxPlanItem, mux_plan_from_dict
+from ass_mux_planner import MuxPlan, MuxPlanItem, infer_lang_raw_from_subtitle_name, mux_plan_from_dict
 from ass_utils import AssPipelineError, ensure_dir
 
 logger = logging.getLogger(__name__)
@@ -267,6 +268,100 @@ def _normalize_plan(plan: MuxPlan | dict) -> MuxPlan:
     return mux_plan_from_dict(plan)
 
 
+def identify_mkv_subtitle_tracks(mkv_path: Path, mkvmerge_bin: str) -> list[dict[str, object]]:
+    try:
+        result = subprocess.run(
+            [mkvmerge_bin, '-J', str(mkv_path)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except Exception as exc:
+        logger.warning('⚠️ 识别 MKV 内置字幕失败: %s (%s)', mkv_path, exc)
+        return []
+
+    if result.returncode != 0:
+        logger.warning('⚠️ mkvmerge -J 失败: %s rc=%s stderr=%s', mkv_path, result.returncode, (result.stderr or '').strip())
+        return []
+
+    try:
+        data = json.loads(result.stdout or '{}')
+    except Exception as exc:
+        logger.warning('⚠️ 解析 MKV 轨道 JSON 失败: %s (%s)', mkv_path, exc)
+        return []
+
+    tracks: list[dict[str, object]] = []
+    for track in data.get('tracks') or []:
+        if str(track.get('type') or '') != 'subtitles':
+            continue
+        props = track.get('properties') or {}
+        track_name = str(props.get('track_name') or '')
+        language = str(props.get('language_ietf') or props.get('language') or '')
+        lang_raw = infer_lang_raw_from_subtitle_name(f'{track_name} {language}', '')
+        tracks.append({
+            'id': int(track.get('id') or 0),
+            'track_name': track_name,
+            'language': language,
+            'lang_raw': lang_raw,
+            'default_track': bool(props.get('default_track')),
+        })
+    return tracks
+
+
+def subtitle_preference_score(lang_raw: str) -> int:
+    text = str(lang_raw or '').strip().lower()
+    if not text:
+        return 0
+    if text.startswith('chs_') and text != 'chs':
+        return 300
+    if text == 'chs':
+        return 200
+    return 0
+
+
+def choose_default_subtitle_candidate(mkv_tracks: list[dict[str, object]], item: MuxPlanItem) -> dict[str, object] | None:
+    candidates: list[dict[str, object]] = []
+
+    for track in mkv_tracks:
+        score = subtitle_preference_score(str(track.get('lang_raw') or ''))
+        if score <= 0:
+            continue
+        candidates.append({
+            'source': 'internal',
+            'score': score,
+            'is_current_default': bool(track.get('default_track')),
+            'track_id': int(track.get('id') or 0),
+            'lang_raw': str(track.get('lang_raw') or ''),
+            'track_name': str(track.get('track_name') or ''),
+        })
+
+    for sub_index, sub in enumerate(item.subs):
+        score = subtitle_preference_score(sub.lang_raw)
+        if score <= 0:
+            continue
+        candidates.append({
+            'source': 'external',
+            'score': score,
+            'is_current_default': False,
+            'sub_index': sub_index,
+            'lang_raw': sub.lang_raw,
+            'track_name': sub.track_name,
+        })
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda item: (
+            int(item['score']),
+            int(bool(item['is_current_default'])),
+            int(item['source'] == 'external'),
+        ),
+        reverse=True,
+    )
+    return candidates[0]
+
+
 def process_one_item(
     item: MuxPlanItem,
     settings: AssMuxSettings,
@@ -304,9 +399,18 @@ def process_one_item(
         return 3
 
     tmp_path = tmp_dir / f"{mkv_path.stem[:80]}.{os.getpid()}.{time.time_ns()}.tmp{mkv_path.suffix}"
-    cmd = [settings.mkvmerge_bin, "-o", str(tmp_path), str(mkv_path)]
+    mkv_subtitle_tracks = identify_mkv_subtitle_tracks(mkv_path, settings.mkvmerge_bin) if settings.set_default_subtitle else []
+    default_candidate = choose_default_subtitle_candidate(mkv_subtitle_tracks, item) if settings.set_default_subtitle else None
 
-    for sub in item.subs:
+    cmd = [settings.mkvmerge_bin, "-o", str(tmp_path)]
+    if default_candidate is not None:
+        for track in mkv_subtitle_tracks:
+            default_value = '1' if default_candidate['source'] == 'internal' and int(track.get('id') or 0) == int(default_candidate.get('track_id') or -1) else '0'
+            cmd.extend(["--default-track-flag", f"{int(track.get('id') or 0)}:{default_value}"])
+        _log(prefix, f"Auto default subtitle => {default_candidate['source']} / {default_candidate.get('lang_raw')} / {default_candidate.get('track_name')}")
+    cmd.append(str(mkv_path))
+
+    for sub_index, sub in enumerate(item.subs):
         sub_path = target_dir / sub.file
         if not sub_path.exists():
             msg = f"{mkv_path.name}: missing sub {sub_path.name}"
@@ -314,6 +418,9 @@ def process_one_item(
             with failures_lock:
                 failures.append(msg)
             return 4
+        if default_candidate is not None:
+            default_value = '1' if default_candidate['source'] == 'external' and int(default_candidate.get('sub_index') or -1) == sub_index else '0'
+            cmd.extend(["--default-track-flag", f"0:{default_value}"])
         cmd.extend([
             "--language", f"0:{sub.mkv_lang}",
             "--track-name", f"0:{sub.track_name}",

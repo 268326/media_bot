@@ -9,7 +9,7 @@ import aiohttp
 import html
 import os
 import time
-from aiogram import types, Router, F
+from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -20,7 +20,8 @@ from aiogram.types import (
 )
 
 from config import (
-    ALLOWED_USER_ID,
+    BOT_USER_IDS,
+    BOT_USER_ID_SET,
     SA_URL,
     SA_PARENT_ID,
     SA_AUTO_ADD_DELAY,
@@ -29,6 +30,17 @@ from config import (
     AUTO_UNLOCK_THRESHOLD,
     LOG_PATH,
     HDHIVE_PARSE_INCOMING_LINKS,
+)
+from ass_formatter import (
+    format_mux_running,
+    format_rescan_notice,
+    format_rescan_running,
+    format_subset_running,
+    prompt_default_group_text,
+    prompt_default_lang_text,
+    prompt_sub_file_text,
+    prompt_track_group_text,
+    prompt_track_lang_text,
 )
 from ass_service import (
     ass_service,
@@ -50,7 +62,6 @@ from session_manager import session_manager
 from tmdb_api import search_tmdb, get_tmdb_details
 from formatter import (
     format_resource_list,
-    format_download_link,
     format_unlock_confirmation,
     format_tmdb_info,
     format_points_message,
@@ -79,7 +90,10 @@ resource_list_state: dict[str, dict] = {}
 # TMDB 候选列表状态缓存："chat_id:message_id" -> {"results": list[dict], "page": int}
 tmdb_search_state: dict[str, dict] = {}
 
+
 TMDB_PAGE_SIZE = 5
+SA_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10, sock_read=30)
+SA_HTTP_HEADERS = {"Accept": "application/json", "User-Agent": "MediaBot/1.0"}
 
 
 def build_tmdb_candidate_message(results: list[dict], page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
@@ -102,7 +116,7 @@ def build_tmdb_candidate_message(results: list[dict], page: int = 0) -> tuple[st
             overview = overview[:100] + "…"
 
         display_index = start + idx
-        result_text += f"\n<blockquote>\n"
+        result_text += "\n<blockquote>\n"
         result_text += f"<b>{display_index}. {item['title']}</b>\n"
         result_text += f"📅 {item.get('release_date', '未知')}"
         if item.get("rating"):
@@ -110,7 +124,7 @@ def build_tmdb_candidate_message(results: list[dict], page: int = 0) -> tuple[st
         else:
             result_text += "\n"
         result_text += f"{overview}\n"
-        result_text += f"</blockquote>"
+        result_text += "</blockquote>"
 
         button_row.append(
             InlineKeyboardButton(
@@ -413,7 +427,6 @@ async def handle_link_extracted(
     can_auto_add_sa = SA_URL and SA_PARENT_ID and SA_ENABLE_115_PUSH and provider_key == "115"
 
     if can_auto_add_sa:
-        message_id = wait_msg.message_id
         task_key = make_message_state_key(wait_msg)
         if not task_key:
             await wait_msg.edit_text("❌ 无法记录自动添加状态，请稍后重试", parse_mode="HTML")
@@ -481,18 +494,12 @@ async def handle_link_extracted(
 async def check_user_permission(message: Message) -> bool:
     """
     检查用户是否有权限使用机器人
-    
-    Args:
-        message: 消息对象
-        
-    Returns:
-        bool: 是否有权限
     """
-    if ALLOWED_USER_ID == 0:
-        return True  # 未配置限制，允许所有人
-    
+    if not BOT_USER_IDS:
+        return True
+
     user_id = message.from_user.id
-    if user_id != ALLOWED_USER_ID:
+    if user_id not in BOT_USER_ID_SET:
         await message.reply(
             format_error_message('permission_denied'),
             parse_mode="HTML"
@@ -504,7 +511,7 @@ async def check_user_permission(message: Message) -> bool:
 
 def resolve_message_owner_id(message: Message | None) -> int | None:
     current = message
-    for _ in range(3):
+    for _ in range(5):
         if not current:
             return None
         from_user = getattr(current, "from_user", None)
@@ -518,12 +525,10 @@ async def check_callback_permission(callback: CallbackQuery) -> bool:
     """检查回调操作者是否有权限。"""
     user_id = callback.from_user.id
 
-    if ALLOWED_USER_ID != 0:
-        if user_id != ALLOWED_USER_ID:
-            await callback.answer("⛔️ 权限不足", show_alert=True)
-            logging.warning(f"❌ 用户 {user_id} ({callback.from_user.username}) 尝试点击受限按钮但被拒绝")
-            return False
-        return True
+    if BOT_USER_IDS and user_id not in BOT_USER_ID_SET:
+        await callback.answer("⛔️ 权限不足", show_alert=True)
+        logging.warning(f"❌ 用户 {user_id} ({callback.from_user.username}) 尝试点击受限按钮但被拒绝")
+        return False
 
     owner_user_id = resolve_message_owner_id(callback.message)
     if owner_user_id and owner_user_id != user_id:
@@ -674,6 +679,7 @@ async def sync_ass_mux_view(bot, chat_id: int, user_id: int):
     panel_text = await ass_service.build_mux_panel_text(chat_id, user_id)
     panel_kb = ass_service.build_mux_plan_keyboard(chat_id, user_id)
     preview_text = await ass_service.build_mux_preview_text(chat_id, user_id)
+    preview_kb = ass_service.build_mux_preview_keyboard(chat_id, user_id)
 
     if session.awaiting_message_id:
         try:
@@ -693,6 +699,7 @@ async def sync_ass_mux_view(bot, chat_id: int, user_id: int):
                 chat_id=chat_id,
                 message_id=session.preview_message_id,
                 text=preview_text,
+                reply_markup=preview_kb,
                 parse_mode="HTML",
             )
         except Exception:
@@ -839,7 +846,13 @@ async def cmd_tail_log(message: Message):
     if not await check_user_permission(message):
         return
 
-    log_path = LOG_PATH
+    log_path = str(LOG_PATH or '').strip()
+    if log_path in ('', '0', 'false', 'False', 'none', 'None'):
+        await message.reply(
+            "⚠️ 当前未启用文件日志；请直接查看 Docker 日志，或在 .env 中设置 <code>MEDIA_BOT_LOG_PATH</code> 并开启 <code>MEDIA_BOT_LOG_TO_FILE=1</code>",
+            parse_mode="HTML"
+        )
+        return
 
     if not os.path.exists(log_path):
         await message.reply(
@@ -849,8 +862,17 @@ async def cmd_tail_log(message: Message):
         return
 
     try:
-        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
+        with open(log_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            file_size = f.tell()
+            chunk_size = 8192
+            seek_pos = max(0, file_size - chunk_size)
+            f.seek(seek_pos)
+            raw = f.read()
+        text = raw.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        if seek_pos > 0 and lines:
+            lines = lines[1:]
     except Exception as e:
         logging.warning(f"⚠️ 读取日志失败: {e}")
         await message.reply("❌ 读取日志失败", parse_mode="HTML")
@@ -1008,8 +1030,13 @@ async def handle_tmdb_link(message: Message, tmdb_id: str, media_type: str):
         f"⏳ 正在获取资源列表...",
         parse_mode="HTML"
     )
-    
-    resources = await get_resources_by_tmdb_id(tmdb_id, media_type)
+
+    try:
+        resources = await get_resources_by_tmdb_id(tmdb_id, media_type)
+    except Exception as exc:
+        logging.error("❌ TMDB 页面资源获取失败: tmdb_id=%s media_type=%s error=%s", tmdb_id, media_type, exc)
+        await wait_msg.edit_text(format_error_message('fetch_failed'), parse_mode="HTML")
+        return
     
     if not resources:
         await wait_msg.edit_text(
@@ -1047,7 +1074,6 @@ async def handle_keyword_search(message: Message, keyword: str, search_type: str
         keyword: 搜索关键词
         search_type: 'tv' 或 'movie'
     """
-    type_name = "📺 剧集" if search_type == "tv" else "🎬 电影"
     media_type = "tv" if search_type == "tv" else "movie"
     wait_msg = await message.reply(f"🔍 搜索中 · {keyword}", parse_mode="HTML")
     
@@ -1163,7 +1189,7 @@ async def callback_ass_menu(callback: CallbackQuery):
     action = (callback.data or "")[len(ASS_MENU_PREFIX):]
     if action == "subset":
         await callback.answer("开始执行子集化字体…")
-        await msg.edit_text("⏳ 正在执行 ASS 字幕子集化字体内封，请稍候…", parse_mode="HTML")
+        await msg.edit_text(format_subset_running(), parse_mode="HTML")
         ok, text = await ass_service.run_subset(callback.bot, msg.chat.id)
         prefix = "✅" if ok else "❌"
         try:
@@ -1179,7 +1205,7 @@ async def callback_ass_menu(callback: CallbackQuery):
             panel_text = await ass_service.build_mux_panel_text(msg.chat.id, callback.from_user.id)
             kb = ass_service.build_mux_plan_keyboard(msg.chat.id, callback.from_user.id)
             await msg.edit_text(panel_text, reply_markup=kb, parse_mode="HTML")
-            preview_msg = await msg.answer("🎞️ <b>计划预览</b>\n\n尚未生成计划。", parse_mode="HTML")
+            preview_msg = await msg.answer("🎞️ <b>计划预览 · 总览</b>\n\n尚未生成计划。", parse_mode="HTML")
             ass_service.bind_mux_message_ids(
                 msg.chat.id,
                 callback.from_user.id,
@@ -1236,30 +1262,69 @@ async def callback_ass_mux(callback: CallbackQuery):
             session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
             ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="default_group", message_id=session.awaiting_message_id if session and session.awaiting_message_id else msg.message_id)
             await callback.answer("请发送默认字幕组")
-            await msg.answer(
-                "✏️ 请输入新的默认字幕组\n\n"
-                "• 直接发送文字 = 设置字幕组\n"
-                "• 发送 <code>-</code> = 清空字幕组\n"
-                "• 修改后请点击“重新扫描生成计划”使其生效",
+            prompt = await msg.answer(
+                prompt_default_group_text(),
                 parse_mode="HTML",
             )
+            try:
+                await asyncio.sleep(20)
+                await prompt.delete()
+            except Exception:
+                pass
             return
 
         if payload == "prompt_lang":
             session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
             ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="default_lang", message_id=session.awaiting_message_id if session and session.awaiting_message_id else msg.message_id)
             await callback.answer("请发送默认语言")
-            await msg.answer(
-                "🌐 请输入新的默认语言，例如：<code>chs</code> / <code>cht</code> / <code>eng</code> / <code>chs_eng</code>",
+            prompt = await msg.answer(
+                prompt_default_lang_text(),
                 parse_mode="HTML",
             )
+            try:
+                await asyncio.sleep(20)
+                await prompt.delete()
+            except Exception:
+                pass
             return
 
         if payload == "refresh":
-            await callback.answer("正在重新扫描生成计划…")
-            await msg.edit_text("🔄 正在扫描目录并生成字幕内封计划…", parse_mode="HTML")
+            prompt = await msg.answer(
+                format_rescan_notice(),
+                parse_mode="HTML",
+            )
+            await msg.edit_text(format_rescan_running(), parse_mode="HTML")
             session, preview = await ass_service.rebuild_mux_plan(msg.chat.id, callback.from_user.id)
             await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
+            try:
+                await asyncio.sleep(8)
+                await prompt.delete()
+            except Exception:
+                pass
+            return
+
+        if payload.startswith("preview:"):
+            mode = payload.split(":", 1)[1]
+            session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
+            if not session:
+                raise RuntimeError("当前会话已失效，请重新发送 /ass")
+            session.preview_mode = mode if mode in ("summary", "list") else "summary"
+            session.preview_page = 0
+            session.touch()
+            await callback.answer("已切换预览模式")
+            await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
+            return
+
+        if payload.startswith("preview_page:"):
+            page = int(payload.split(":", 1)[1])
+            session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
+            if not session:
+                raise RuntimeError("当前会话已失效，请重新发送 /ass")
+            if page != session.preview_page:
+                session.preview_page = max(0, page)
+                session.touch()
+                await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
+            await callback.answer()
             return
 
         if payload.startswith("page:"):
@@ -1278,7 +1343,6 @@ async def callback_ass_mux(callback: CallbackQuery):
         if payload.startswith("edit_item:"):
             _, index_raw = payload.split(":", 1)
             item_index = int(index_raw)
-            session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
             await callback.answer("打开条目编辑")
             text = ass_service.format_mux_item_detail(msg.chat.id, callback.from_user.id, item_index)
             kb = ass_service.build_mux_item_keyboard(msg.chat.id, callback.from_user.id, item_index)
@@ -1290,22 +1354,16 @@ async def callback_ass_mux(callback: CallbackQuery):
             item_index = int(item_raw)
             sub_index = int(sub_raw)
             session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
-            candidates = ass_service.list_mux_candidate_subs(msg.chat.id, callback.from_user.id, item_index)
             ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="sub_file", item_index=item_index, sub_index=sub_index, message_id=session.awaiting_message_id if session and session.awaiting_message_id else msg.message_id)
-            await callback.answer("请发送新的字幕文件名")
-            lines = [
-                "🧩 请输入新的字幕文件名（只输入文件名，不要带路径）",
-                "",
-                "<b>同目录可选字幕：</b>",
-            ]
-            if candidates:
-                for name in candidates[:20]:
-                    lines.append(f"• <code>{html.escape(name)}</code>")
-                if len(candidates) > 20:
-                    lines.append(f"• ... 其余 <code>{len(candidates) - 20}</code> 个已省略")
-            else:
-                lines.append("• <code>（未发现 .ass/.sup）</code>")
-            await msg.answer("\n".join(lines), parse_mode="HTML")
+            prompt = await msg.answer(
+                prompt_sub_file_text(),
+                parse_mode="HTML",
+            )
+            try:
+                await asyncio.sleep(20)
+                await prompt.delete()
+            except Exception:
+                pass
             return
 
         if payload.startswith("prompt_subgroup:"):
@@ -1315,10 +1373,15 @@ async def callback_ass_mux(callback: CallbackQuery):
             session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
             ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="track_group", item_index=item_index, sub_index=sub_index, message_id=session.awaiting_message_id if session and session.awaiting_message_id else msg.message_id)
             await callback.answer("请发送字幕组")
-            await msg.answer(
-                "✏️ 请输入新的字幕组\n\n• 直接发送文字 = 设置字幕组\n• 发送 <code>-</code> = 清空字幕组",
+            prompt = await msg.answer(
+                prompt_track_group_text(),
                 parse_mode="HTML",
             )
+            try:
+                await asyncio.sleep(20)
+                await prompt.delete()
+            except Exception:
+                pass
             return
 
         if payload.startswith("prompt_sublang:"):
@@ -1328,10 +1391,15 @@ async def callback_ass_mux(callback: CallbackQuery):
             session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
             ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="track_lang", item_index=item_index, sub_index=sub_index, message_id=session.awaiting_message_id if session and session.awaiting_message_id else msg.message_id)
             await callback.answer("请发送字幕语言")
-            await msg.answer(
-                "🌐 请输入新的字幕语言，例如：<code>chs</code> / <code>cht</code> / <code>eng</code> / <code>chs_eng</code>",
+            prompt = await msg.answer(
+                prompt_track_lang_text(),
                 parse_mode="HTML",
             )
+            try:
+                await asyncio.sleep(20)
+                await prompt.delete()
+            except Exception:
+                pass
             return
 
         if payload == "back_plan":
@@ -1349,11 +1417,25 @@ async def callback_ass_mux(callback: CallbackQuery):
 
         if payload == "run_now":
             await callback.answer("开始执行字幕内封…")
-            await msg.edit_text("⏳ 正在执行字幕内封，请稍候…\n\n详细过程请查看 Docker 日志。", parse_mode="HTML")
+            await msg.edit_text(
+                format_mux_running(),
+                parse_mode="HTML",
+            )
             ok, text = await ass_service.run_mux(callback.bot, msg.chat.id, callback.from_user.id)
             prefix = "✅" if ok else "❌"
             try:
                 await msg.edit_text(text, parse_mode="HTML")
+                session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
+                if session and session.preview_message_id:
+                    try:
+                        await callback.bot.edit_message_text(
+                            chat_id=msg.chat.id,
+                            message_id=session.preview_message_id,
+                            text="✅ 预览已锁定，本次任务已开始执行。",
+                            parse_mode="HTML",
+                        )
+                    except Exception:
+                        pass
             except Exception:
                 await msg.answer(f"{prefix} 字幕内封任务已完成，请查看机器人日志/汇总消息", parse_mode="HTML")
             return
@@ -1698,8 +1780,8 @@ async def auto_add_to_sa(task_key: str, link: str, original_message: Message, co
                     parse_mode="HTML",
                     disable_web_page_preview=True
                 )
-            except:
-                pass
+            except Exception as exc:
+                logging.debug("更新自动添加倒计时消息失败: %s", exc)
             
             await asyncio.sleep(step if remaining > step else remaining)
         
@@ -1720,7 +1802,7 @@ async def auto_add_to_sa(task_key: str, link: str, original_message: Message, co
         }
         
         # 发送POST请求
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=SA_HTTP_TIMEOUT, headers=SA_HTTP_HEADERS) as session:
             async with session.post(api_url, params={"token": SA_TOKEN}, json=payload) as response:
                 if response.status == 200:
                     data = await response.json()
@@ -1756,8 +1838,8 @@ async def auto_add_to_sa(task_key: str, link: str, original_message: Message, co
                 f"❌ 自动添加失败: {str(e)}",
                 parse_mode="HTML"
             )
-        except:
-            pass
+        except Exception as exc:
+            logging.debug("更新自动添加失败提示消息失败: %s", exc)
     finally:
         # 清理任务
         if task_key in pending_sa_tasks:
@@ -1804,7 +1886,7 @@ async def callback_send_to_sa(callback: CallbackQuery):
         await callback.answer("⏳ 正在添加到Symedia...", show_alert=False)
         
         # 发送POST请求
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=SA_HTTP_TIMEOUT, headers=SA_HTTP_HEADERS) as session:
             async with session.post(api_url, params={"token": SA_TOKEN}, json=payload) as response:
                 if response.status == 200:
                     data = await response.json()
@@ -2005,7 +2087,12 @@ async def handle_direct_link(message: Message):
                 parse_mode="HTML"
             )
             
-            resources = await get_resources_by_tmdb_id(tmdb_id, media_type)
+            try:
+                resources = await get_resources_by_tmdb_id(tmdb_id, media_type)
+            except Exception as exc:
+                logging.error("❌ 直发 TMDB 页面资源获取失败: tmdb_id=%s media_type=%s error=%s", tmdb_id, media_type, exc)
+                await wait_msg.edit_text(format_error_message('fetch_failed'), parse_mode="HTML")
+                return
             
             if not resources:
                 await wait_msg.edit_text(f"❌ 该{type_name}暂无资源", parse_mode="HTML")

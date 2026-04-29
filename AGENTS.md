@@ -45,12 +45,11 @@
 5. 注册 `handlers.router`
 6. `start_polling()` 启动 Bot
 
-### 2.3 停止时做的事
-按相反顺序停止后台组件，避免残留任务 / watcher / 队列 worker。
+### 2.5 Telegram 配置约定
+- 统一使用 `bot_user_id` 控制可使用机器人的用户 ID（逗号分隔）
+- 统一使用 `bot_chat_id` 作为接收消息通知的用户/群组/频道 Chat ID（逗号分隔）
+- 不再使用 `ALLOWED_USER_ID` / `TGBOT_NOTIFY_CHAT_ID` / `TARGET_GROUP_ID`
 
----
-
-## 3. 顶层模块分层
 
 ```text
 main.py

@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from config import ALLOWED_USER_ID, TGBOT_NOTIFY_CHAT_ID
+from config import BOT_CHAT_ID, BOT_USER_IDS
 
 TRUTHY = {"1", "true", "yes", "on"}
 
@@ -22,6 +22,7 @@ class AssMuxSettings:
     allow_cross_fs: bool
     notify_chat_id: str
     mkvmerge_bin: str
+    set_default_subtitle: bool = True
     idle_timeout_s: int = 1800
     soft_warn_after_s: int = 7200
     hard_cap_s: int = 43200
@@ -61,9 +62,9 @@ def load_ass_mux_settings_from_env() -> AssMuxSettings:
 
     notify_chat_id = os.getenv("ASS_MUX_NOTIFY_CHAT_ID", "").strip()
     if not notify_chat_id:
-        notify_chat_id = str(TGBOT_NOTIFY_CHAT_ID or "").strip()
-    if not notify_chat_id and ALLOWED_USER_ID:
-        notify_chat_id = str(ALLOWED_USER_ID)
+        notify_chat_id = str(BOT_CHAT_ID or "").strip()
+    if not notify_chat_id and BOT_USER_IDS:
+        notify_chat_id = str(BOT_USER_IDS[0])
 
     jobs_raw = os.getenv("ASS_MUX_JOBS", "2").strip() or "2"
     try:
@@ -83,6 +84,7 @@ def load_ass_mux_settings_from_env() -> AssMuxSettings:
         allow_cross_fs=_env_bool("ASS_MUX_ALLOW_CROSS_FS", False),
         notify_chat_id=notify_chat_id,
         mkvmerge_bin=os.getenv("ASS_MKVMERGE_BIN", "mkvmerge").strip() or "mkvmerge",
+        set_default_subtitle=_env_bool("ASS_MUX_SET_DEFAULT_SUBTITLE", True),
         idle_timeout_s=_env_int("ASS_MUX_IDLE_TIMEOUT_SECONDS", 1800, minimum=60),
         soft_warn_after_s=_env_int("ASS_MUX_SOFT_WARN_AFTER_SECONDS", 7200, minimum=0),
         hard_cap_s=_env_int("ASS_MUX_HARD_CAP_SECONDS", 43200, minimum=0),

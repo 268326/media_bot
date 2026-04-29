@@ -7,16 +7,35 @@ import logging
 import os
 import glob
 import sys
+import json
+import time
 import nest_asyncio
 from dotenv import load_dotenv
 
-DOTENV_PATH = os.getenv("MEDIA_BOT_DOTENV_PATH", "/app/.env")
+
+def _resolve_dotenv_path() -> str:
+    explicit = os.getenv("MEDIA_BOT_DOTENV_PATH", "").strip()
+    if explicit:
+        return explicit
+    docker_path = "/app/.env"
+    if os.path.exists(docker_path):
+        return docker_path
+    local_path = os.path.abspath(".env")
+    if os.path.exists(local_path):
+        return local_path
+    return docker_path
+
+
+DOTENV_PATH = _resolve_dotenv_path()
 load_dotenv(dotenv_path=DOTENV_PATH, override=True)
 
 LOG_PATH = os.getenv("MEDIA_BOT_LOG_PATH", os.getenv("HDHIVE_LOG_PATH", "media_bot.log"))
+if str(LOG_PATH).strip() in ("", "0", "false", "False", "none", "None"):
+    LOG_PATH = "media_bot.log"
 LOG_TO_FILE = os.getenv("MEDIA_BOT_LOG_TO_FILE", "0").strip().lower() in ("1", "true", "yes", "on")
 MEDIA_BOT_DEBUG = os.getenv("MEDIA_BOT_DEBUG", "false").strip().lower() in ("1", "true", "yes", "on")
 LOG_LEVEL = logging.DEBUG if MEDIA_BOT_DEBUG else logging.INFO
+HEALTHCHECK_STATE_PATH = os.getenv("MEDIA_BOT_HEALTHCHECK_STATE_PATH", "/tmp/media_bot_health.json")
 
 if LOG_TO_FILE:
     log_dir = os.path.dirname(LOG_PATH)
@@ -55,6 +74,42 @@ from strm_notifier import strm_notifier
 from hdhive_unlock_service import hdhive_unlock_service
 
 
+def health_snapshot() -> dict[str, object]:
+    return {
+        "ok": True,
+        "strm_enabled": bool(strm_service.settings.enabled),
+        "strm_started": bool(strm_service.started),
+        "strm_running": bool(strm_service.status().get("running")),
+        "unlock_queue_started": bool(hdhive_unlock_service.started),
+        "unlock_queue_workers": len(hdhive_unlock_service.worker_tasks),
+        "checkin_enabled": bool(checkin_scheduler.enabled),
+        "checkin_scheduler_started": bool(checkin_scheduler.scheduler is not None),
+    }
+
+
+def write_health_snapshot(snapshot: dict[str, object]) -> None:
+    try:
+        parent = os.path.dirname(HEALTHCHECK_STATE_PATH)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        payload = dict(snapshot)
+        payload["pid"] = os.getpid()
+        payload["ts"] = int(time.time())
+        with open(HEALTHCHECK_STATE_PATH, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, separators=(",", ":"))
+    except Exception as exc:
+        logging.debug("写入健康快照失败: %s", exc)
+
+
+async def health_heartbeat(stop_event: asyncio.Event) -> None:
+    while not stop_event.is_set():
+        write_health_snapshot(health_snapshot())
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=30)
+        except asyncio.TimeoutError:
+            continue
+
+
 async def main():
     """主程序"""
     logging.info("🚀 Media Bot 启动中...")
@@ -67,8 +122,8 @@ async def main():
             try:
                 os.remove(file)
                 logging.info(f"🗑️ 启动时清除调试图片: {file}")
-            except:
-                pass
+            except Exception as exc:
+                logging.debug("启动时清理调试图片失败: file=%s error=%s", file, exc)
         logging.info(f"✅ 启动时清除了 {len(debug_files)} 个调试图片")
     
     # 创建 Bot 和 Dispatcher 实例
@@ -76,6 +131,10 @@ async def main():
     dp = Dispatcher()
 
     await strm_notifier.start(bot)
+
+    heartbeat_stop = asyncio.Event()
+    heartbeat_task = asyncio.create_task(health_heartbeat(heartbeat_stop))
+    write_health_snapshot(health_snapshot())
 
     # 启动 HDHive 解锁队列服务
     await hdhive_unlock_service.start()
@@ -95,6 +154,13 @@ async def main():
         logging.error(f"❌ Bot 运行出错: {e}")
         raise
     finally:
+        heartbeat_stop.set()
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
+
         # 停止自动签到调度
         await checkin_scheduler.stop()
 
@@ -114,6 +180,29 @@ async def main():
 
 if __name__ == "__main__":
     try:
+        if "--healthcheck" in sys.argv:
+            snapshot = health_snapshot()
+            if os.path.exists(HEALTHCHECK_STATE_PATH):
+                try:
+                    with open(HEALTHCHECK_STATE_PATH, "r", encoding="utf-8") as fh:
+                        persisted = json.load(fh)
+                    ts = int(persisted.get("ts") or 0)
+                    age = max(0, int(time.time()) - ts)
+                    snapshot["heartbeat_age_seconds"] = age
+                    snapshot["heartbeat_file_present"] = True
+                    if age > 120:
+                        snapshot["ok"] = False
+                        snapshot["reason"] = f"heartbeat stale: {age}s"
+                except Exception as exc:
+                    snapshot["ok"] = False
+                    snapshot["reason"] = f"heartbeat read failed: {exc}"
+            else:
+                snapshot["heartbeat_file_present"] = False
+            if not snapshot.get("ok"):
+                logging.error("❌ 健康检查失败: %s", snapshot)
+                sys.exit(1)
+            logging.info("✅ 健康检查通过: %s", snapshot)
+            sys.exit(0)
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n👋 再见！")

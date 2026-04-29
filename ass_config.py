@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from config import ALLOWED_USER_ID, TGBOT_NOTIFY_CHAT_ID
+from config import BOT_CHAT_ID, BOT_USER_IDS
 
 
 @dataclass(slots=True)
@@ -18,6 +18,9 @@ class AssSettings:
     fontforge_bin: str
     sevenz_bin: str
     unzip_bin: str
+    cleanup_work_dir_on_success: bool
+    cleanup_work_dir_on_failure: bool
+    delete_source_ass_on_success: bool
 
 
 TRUTHY = {"1", "true", "yes", "on"}
@@ -37,9 +40,9 @@ def load_ass_settings_from_env() -> AssSettings:
 
     notify_chat_id = os.getenv("ASS_NOTIFY_CHAT_ID", "").strip()
     if not notify_chat_id:
-        notify_chat_id = str(TGBOT_NOTIFY_CHAT_ID or "").strip()
-    if not notify_chat_id and ALLOWED_USER_ID:
-        notify_chat_id = str(ALLOWED_USER_ID)
+        notify_chat_id = str(BOT_CHAT_ID or "").strip()
+    if not notify_chat_id and BOT_USER_IDS:
+        notify_chat_id = str(BOT_USER_IDS[0])
 
     return AssSettings(
         target_dir=target_dir,
@@ -51,4 +54,7 @@ def load_ass_settings_from_env() -> AssSettings:
         fontforge_bin=os.getenv("ASS_FONTFORGE_BIN", "fontforge").strip() or "fontforge",
         sevenz_bin=os.getenv("ASS_7Z_BIN", "7z").strip() or "7z",
         unzip_bin=os.getenv("ASS_UNZIP_BIN", "unzip").strip() or "unzip",
+        cleanup_work_dir_on_success=_env_bool("ASS_CLEANUP_WORK_DIR_ON_SUCCESS", True),
+        cleanup_work_dir_on_failure=_env_bool("ASS_CLEANUP_WORK_DIR_ON_FAILURE", False),
+        delete_source_ass_on_success=_env_bool("ASS_DELETE_SOURCE_ASS_ON_SUCCESS", False),
     )

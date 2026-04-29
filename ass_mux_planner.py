@@ -130,6 +130,83 @@ def build_track_name(group: str, lang_raw: str) -> tuple[str, str]:
     return mkv_lang, track_name
 
 
+def infer_lang_raw_from_subtitle_name(name: str, fallback: str) -> str:
+    stem = Path(name).stem
+    token_parts = [part for part in re.split(r"[\s._\-+/&|／＋＆｜]+", stem) if part]
+    bracket_parts = re.findall(r"[\[\(【（]([^\]\)】）]{1,20})[\]\)】）]", stem)
+
+    candidates: list[str] = []
+
+    def _push(text: str) -> None:
+        if text and text not in candidates:
+            candidates.append(text)
+
+    # 优先检查：括号整体片段、完整 stem、相邻 token 组合
+    for part in reversed(bracket_parts):
+        _push(part)
+    _push(stem)
+
+    for size in (3, 2):
+        if len(token_parts) >= size:
+            for start in range(len(token_parts) - size + 1):
+                _push(''.join(token_parts[start:start + size]))
+                _push('_'.join(token_parts[start:start + size]))
+
+    # 最后才回退到单 token，避免 JPTC / CHS&JPN 先被识别成单语
+    for part in reversed(token_parts):
+        _push(part)
+
+    def _normalize(text: str) -> str:
+        return re.sub(r"[\s._\-\[\]\(\)【】（）&+|/／＋＆｜]+", "", text).lower()
+
+    def _detect(segment: str) -> str | None:
+        raw = segment.strip()
+        if not raw:
+            return None
+        s = _normalize(raw)
+        if not s:
+            return None
+
+        explicit_pairs = [
+            ("chs_eng", [
+                "简英", "英简", "chseng", "engchs", "sceng", "engsc", "ensc", "scen",
+                "zhhanseng", "engzhhans", "zhcneng", "engzhcn", "中英双语", "双语简英",
+            ]),
+            ("cht_eng", [
+                "繁英", "英繁", "chteng", "engcht", "tceng", "engtc", "entc", "tcen",
+                "big5eng", "engbig5", "zhhanteng", "engzhhant", "zhtweng", "engzhtw", "繁英双语",
+            ]),
+            ("chs_jpn", [
+                "简日", "日简", "chsjpn", "jpnchs", "chsjp", "jpchs", "jpsc", "scjp", "jpsc字幕",
+                "zhhansjpn", "jpnzhhans", "zhcnjpn", "jpnzhcn", "简日双语",
+            ]),
+            ("cht_jpn", [
+                "繁日", "日繁", "chtjpn", "jpncht", "chtjp", "jpcht", "jptc", "tcjp", "jptc字幕",
+                "big5jp", "jpbig5", "zhhantjpn", "jpnzhhant", "zhtwjpn", "jpnzhtw", "繁日双语",
+            ]),
+        ]
+        for lang_raw, patterns in explicit_pairs:
+            if any(p in s for p in patterns):
+                return lang_raw
+
+        short = len(s) <= 20
+        if short and any(p in s for p in ["简中", "简体", "chs", "gb", "gbk", "gb2312", "zhhans", "zhcn", "zhchs", "简"]):
+            return "chs"
+        if short and any(p in s for p in ["繁中", "繁體", "繁体", "cht", "big5", "zhhant", "zhtw", "zhhk", "繁"]):
+            return "cht"
+        if short and any(p in s for p in ["日文", "日语", "jpn", "japanese", "jap", "ja", "jp", "日"]):
+            return "jpn"
+        if short and any(p in s for p in ["英文", "英语", "eng", "english", "enus", "英"]):
+            return "eng"
+        return None
+
+    for candidate in candidates:
+        detected = _detect(candidate)
+        if detected:
+            return detected
+    return fallback
+
+
 def _iter_files(root: Path, recursive: bool, suffixes: tuple[str, ...]) -> list[Path]:
     iterator = root.rglob("*") if recursive else root.glob("*")
     return sorted(
@@ -209,13 +286,15 @@ def build_mux_plan(settings: AssMuxSettings, *, default_group: str | None = None
         tracks: list[SubtitleTrackPlan] = []
         for sub in matched:
             rel_sub = sub.relative_to(target_dir)
+            detected_lang_raw = infer_lang_raw_from_subtitle_name(sub.name, lang_raw)
+            detected_mkv_lang, detected_track_name = build_track_name(group, detected_lang_raw)
             tracks.append(
                 SubtitleTrackPlan(
                     file=str(rel_sub),
                     group=group,
-                    lang_raw=lang_raw,
-                    mkv_lang=mkv_lang,
-                    track_name=track_name,
+                    lang_raw=detected_lang_raw,
+                    mkv_lang=detected_mkv_lang,
+                    track_name=detected_track_name,
                 )
             )
             total_sub_tracks += 1

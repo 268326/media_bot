@@ -6,6 +6,9 @@ import logging
 import aiohttp
 from config import TMDB_API_KEY
 
+TMDB_TIMEOUT = aiohttp.ClientTimeout(total=20, connect=10, sock_read=20)
+TMDB_HEADERS = {"Accept": "application/json", "User-Agent": "MediaBot/1.0"}
+
 
 def _get_result_title(item: dict) -> str:
     return item.get("title") or item.get("name") or ""
@@ -75,7 +78,7 @@ async def search_tmdb(keyword: str, media_type: str = "multi"):
             "page": 1
         }
         
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=TMDB_TIMEOUT, headers=TMDB_HEADERS) as session:
             async with session.get(url, params=params) as response:
                 if response.status == 200:
                     data = await response.json()
@@ -123,7 +126,7 @@ async def get_tmdb_details(tmdb_id: int, media_type: str):
             "language": "zh-CN"
         }
         
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=TMDB_TIMEOUT, headers=TMDB_HEADERS) as session:
             async with session.get(url, params=params) as response:
                 if response.status == 200:
                     data = await response.json()

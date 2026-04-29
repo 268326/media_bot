@@ -12,7 +12,7 @@
 - `/points` 查询积分
 - `/checkin` 手动每日签到
 - `CHECKIN_CRON` 定时自动签到
-- 自动签到失败时通知 `ALLOWED_USER_ID`
+- 自动签到失败时通知 `bot_chat_id`（若为空则回退 `bot_user_id`）
 - `/danmu` 下载 B 站弹幕 XML
 - `/ass` 打开 ASS 菜单：
   - 子集化字体：ASS 字幕纯 TTF 字体子集化并生成 `*.assfonts.ass`
@@ -33,7 +33,7 @@
 
 常用可选：
 
-- `ALLOWED_USER_ID`：机器人可用用户，同时也是自动签到失败通知接收人
+- `bot_user_id`：可使用 Telegram 机器人的用户 ID 清单，多个用户用 `,` 分隔；留空则所有用户都能使用
 - `AUTO_UNLOCK_THRESHOLD`
 - `HDHIVE_UNLOCK_RATE_LIMIT_PER_SECOND`：HDHive 解锁队列限速，默认每秒 `3` 次
 - `HDHIVE_PARSE_INCOMING_LINKS`：是否自动解析聊天中直接收到的 HDHive 链接（默认开启）
@@ -47,13 +47,16 @@
 - `SA_ENABLE_115_PUSH`
 - `MEDIA_BOT_DEBUG`：是否输出调试日志（true/false）
 - `MEDIA_BOT_LOG_TO_FILE`：是否同时写本地日志文件；默认 `0`，仅输出到 Docker 日志
-- `TGBOT_NOTIFY_CHAT_ID`：STRM / ASS 汇总通知接收目标（用户/群组/频道 Chat ID）
+- `bot_chat_id`：接受消息通知的用户、群组或频道 Chat ID，多个用 `,` 分隔；用于 STRM / ASS 汇总和自动签到失败通知
 
 ### /ass 子集化字体相关
 
 - `ASS_TARGET_HOST_DIR`：宿主机字幕目录，供 Docker 挂载
 - `ASS_TARGET_DIR`：容器内 ASS 处理目录，`/ass -> 子集化字体` 从这里读取字幕/字体/压缩包
-- `ASS_NOTIFY_CHAT_ID`：`/ass` 子集化字体汇总通知目标；留空时回退 `TGBOT_NOTIFY_CHAT_ID`，再回退 `ALLOWED_USER_ID`
+- `ASS_NOTIFY_CHAT_ID`：`/ass` 子集化字体汇总通知目标；留空时回退 `bot_chat_id`，再回退 `bot_user_id` 第一个用户
+- `ASS_CLEANUP_WORK_DIR_ON_SUCCESS`：是否在子集化全部成功后自动清理工作目录，默认 `1`
+- `ASS_CLEANUP_WORK_DIR_ON_FAILURE`：是否在失败后也清理工作目录，默认 `0`
+- `ASS_DELETE_SOURCE_ASS_ON_SUCCESS`：是否在全部成功后删除原始 ASS，默认 `0`
 - `ASS_RECURSIVE`：是否递归扫描子目录
 - `ASS_INCLUDE_SYSTEM_FONTS`：是否把系统字体纳入纯 TTF 字体池
 - `ASS_WORK_DIR`：临时工作目录（默认 `<ASS_TARGET_DIR>/.assfonts_pipeline_work`）
@@ -62,12 +65,13 @@
 
 - `ASS_MUX_TARGET_HOST_DIR`：宿主机视频/字幕目录，供 Docker 挂载
 - `ASS_MUX_TARGET_DIR`：容器内字幕内封目录，`/ass -> 内封字幕` 从这里扫描 `.mkv` 与同目录 `.ass/.sup`
-- `ASS_MUX_NOTIFY_CHAT_ID`：`/ass` 字幕内封汇总通知目标；留空时回退 `TGBOT_NOTIFY_CHAT_ID`，再回退 `ALLOWED_USER_ID`
+- `ASS_MUX_NOTIFY_CHAT_ID`：`/ass` 字幕内封汇总通知目标；留空时回退 `bot_chat_id`，再回退 `bot_user_id` 第一个用户
 - `ASS_MUX_RECURSIVE`：是否递归扫描子目录
-- `ASS_MUX_DEFAULT_LANG`：默认字幕语言（如 `chs` / `cht` / `eng` / `chs_eng`）
+- `ASS_MUX_DEFAULT_LANG`：默认字幕语言（如 `chs` / `cht` / `eng` / `chs_eng`），仅在文件名无法识别语言时回退使用
 - `ASS_MUX_DEFAULT_GROUP`：默认字幕组
 - `ASS_MUX_JOBS`：并发执行 `mkvmerge` 的线程数
 - `ASS_MUX_DELETE_EXTERNAL_SUBS`：是否默认在内封成功后删除外挂字幕
+- `ASS_MUX_SET_DEFAULT_SUBTITLE`：是否自动设置默认字幕轨，默认 `1`；规则为“简体双语优先，其次简体”，并把 MKV 现有字幕一起纳入判断
 - `ASS_MUX_ALLOW_CROSS_FS`：是否允许临时目录与 MKV 跨文件系统
 - `ASS_MUX_TMP_DIR`：临时目录（默认 `<ASS_MUX_TARGET_DIR>/.ass_mux_tmp`）
 - `ASS_MUX_IDLE_TIMEOUT_SECONDS`：标准模式空闲超时秒数，默认 `1800`（30 分钟）
@@ -99,7 +103,7 @@
 - `/points`、`/checkin` 和自动签到依赖 HDHive Premium 权限对应的 Open API
 - `MEDIA_BOT_DEBUG=true` 时会输出 DEBUG 日志，便于排查问题
 - `MEDIA_BOT_LOG_TO_FILE=0` 时，日志仅输出到 stdout/stderr，可直接用 `docker compose logs -f media_bot` 查看
-- `TGBOT_NOTIFY_CHAT_ID` 配置后，STRM 和 `/ass` 可发送 Telegram 汇总通知
+- `bot_chat_id` 配置后，STRM、`/ass` 和自动签到失败可发送 Telegram 通知
 - `/ass` 不写独立本地日志文件，运行详情直接进入 Docker 日志
 - `/ass -> 子集化字体` 在真正内嵌前会先把字体池中的 OTF 转成 TTF，并复制原字体 name table，后续只用纯 TTF/TTC 做匹配与内嵌
 - `/ass -> 内封字幕` 使用 `mkvmerge` 写回原 MKV；支持在 Telegram 中逐项修改默认字幕组、语言、字幕文件名，并可切换 DRY-RUN / 删除外挂字幕

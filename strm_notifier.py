@@ -12,7 +12,7 @@ from pathlib import Path
 
 from aiogram import Bot
 
-from config import TGBOT_NOTIFY_CHAT_ID
+from config import BOT_CHAT_IDS
 from strm_batch_state import StrmBatchState
 from strm_reason import UNKNOWN_REASON, humanize_reason
 
@@ -79,7 +79,7 @@ class RootCompletedEvent:
 
 class StrmNotifier:
     def __init__(self):
-        self.chat_id = str(TGBOT_NOTIFY_CHAT_ID or "").strip()
+        self.chat_ids = [str(item).strip() for item in BOT_CHAT_IDS if str(item).strip()]
         self.bot: Bot | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self.flush_task: asyncio.Task | None = None
@@ -92,8 +92,8 @@ class StrmNotifier:
         self.root_completed: list[RootCompletedEvent] = []
 
     async def start(self, bot: Bot):
-        if not self.chat_id:
-            logging.info("ℹ️ STRM 通知未启用（TGBOT_NOTIFY_CHAT_ID 为空）")
+        if not self.chat_ids:
+            logging.info("ℹ️ STRM 通知未启用（bot_chat_id 为空）")
             return
         if self.started:
             return
@@ -103,7 +103,7 @@ class StrmNotifier:
         self.flush_event = asyncio.Event()
         self.flush_task = asyncio.create_task(self._flush_loop())
         self.started = True
-        logging.info("✅ STRM 通知已启用: chat_id=%s", self.chat_id)
+        logging.info("✅ STRM 通知已启用: chat_ids=%s", self.chat_ids)
 
     async def stop(self):
         if not self.started:
@@ -276,7 +276,7 @@ class StrmNotifier:
                 logging.exception("❌ STRM 通知循环异常: %s", exc)
 
     async def _flush_once(self):
-        if not self.bot or not self.chat_id:
+        if not self.bot or not self.chat_ids:
             return
 
         with self.lock:
@@ -292,10 +292,11 @@ class StrmNotifier:
             messages.extend(self._format_root_messages(root_events))
 
         for text in messages:
-            try:
-                await self.bot.send_message(self.chat_id, text, parse_mode="HTML")
-            except Exception as exc:
-                logging.error("❌ STRM 通知发送失败: %s", exc)
+            for chat_id in self.chat_ids:
+                try:
+                    await self.bot.send_message(int(chat_id), text, parse_mode="HTML")
+                except Exception as exc:
+                    logging.error("❌ STRM 通知发送失败: chat_id=%s error=%s", chat_id, exc)
 
     def _short_reason(self, reason: str) -> str:
         return humanize_reason(reason)

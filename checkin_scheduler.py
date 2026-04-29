@@ -10,7 +10,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from checkin_service import daily_check_in
-from config import CHECKIN_CRON, CHECKIN_TIMEZONE, ALLOWED_USER_ID
+from config import CHECKIN_CRON, CHECKIN_TIMEZONE, BOT_CHAT_IDS, BOT_USER_IDS
 
 
 class CheckinScheduler:
@@ -25,8 +25,9 @@ class CheckinScheduler:
         """自动签到失败时通过 Telegram 通知管理员"""
         if not self.bot:
             return
-        if ALLOWED_USER_ID == 0:
-            logging.warning("⚠️ 自动签到失败但未配置 ALLOWED_USER_ID，跳过通知")
+        targets = [str(item) for item in (BOT_CHAT_IDS or BOT_USER_IDS)]
+        if not targets:
+            logging.warning("⚠️ 自动签到失败但未配置 bot_chat_id / bot_user_id，跳过通知")
             return
 
         text = (
@@ -35,11 +36,12 @@ class CheckinScheduler:
             f"签到前积分: <code>{result.get('before_points') if result.get('before_points') is not None else '未知'}</code>\n"
             f"签到后积分: <code>{result.get('after_points') if result.get('after_points') is not None else '未知'}</code>"
         )
-        try:
-            await self.bot.send_message(ALLOWED_USER_ID, text, parse_mode="HTML")
-            logging.info("📨 自动签到失败通知已发送到 ALLOWED_USER_ID=%s", ALLOWED_USER_ID)
-        except Exception as e:
-            logging.error("❌ 自动签到失败通知发送失败: %s", e)
+        for target in targets:
+            try:
+                await self.bot.send_message(int(target), text, parse_mode="HTML")
+                logging.info("📨 自动签到失败通知已发送到 target=%s", target)
+            except Exception as e:
+                logging.error("❌ 自动签到失败通知发送失败: target=%s error=%s", target, e)
 
     async def _run_checkin_job(self):
         """定时任务：执行签到并记录日志"""

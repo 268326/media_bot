@@ -20,6 +20,19 @@ DEFAULT_ROOTS = (
 )
 
 
+def _resolve_dotenv_path() -> str:
+    explicit = os.getenv("MEDIA_BOT_DOTENV_PATH", "").strip()
+    if explicit:
+        return explicit
+    docker_path = "/app/.env"
+    if os.path.exists(docker_path):
+        return docker_path
+    local_path = os.path.abspath(".env")
+    if os.path.exists(local_path):
+        return local_path
+    return docker_path
+
+
 @dataclass(frozen=True)
 class StrmPruneSettings:
     enabled: bool = False
@@ -92,7 +105,7 @@ def _parse_roots(raw: str | None) -> tuple[str, ...]:
 
 
 def load_settings_from_env() -> StrmPruneSettings:
-    dotenv_path = os.getenv("MEDIA_BOT_DOTENV_PATH", "/app/.env")
+    dotenv_path = _resolve_dotenv_path()
     env_map = {key: str(value) for key, value in dotenv_values(dotenv_path).items() if value is not None}
 
     emby_url = (

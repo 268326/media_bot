@@ -9,9 +9,66 @@ from dotenv import load_dotenv
 from strm_config import StrmSettings
 from strm_prune import load_settings_from_env
 
+_ENV_PARSE_WARNINGS: list[str] = []
+
+
+def _resolve_dotenv_path() -> str:
+    explicit = os.getenv("MEDIA_BOT_DOTENV_PATH", "").strip()
+    if explicit:
+        return explicit
+    docker_path = "/app/.env"
+    if os.path.exists(docker_path):
+        return docker_path
+    local_path = os.path.abspath(".env")
+    if os.path.exists(local_path):
+        return local_path
+    return docker_path
+
 # 加载环境变量
-DOTENV_PATH = os.getenv("MEDIA_BOT_DOTENV_PATH", "/app/.env")
+DOTENV_PATH = _resolve_dotenv_path()
 load_dotenv(dotenv_path=DOTENV_PATH, override=True)
+
+
+def _split_csv_env(value: str | None) -> list[str]:
+    text = str(value or '').strip()
+    if not text:
+        return []
+    return [item.strip() for item in text.split(',') if item and item.strip()]
+
+
+def _parse_int_csv(value: str | None) -> list[int]:
+    result: list[int] = []
+    for item in _split_csv_env(value):
+        try:
+            result.append(int(item))
+        except ValueError:
+            continue
+    return result
+
+
+def _pick_first_nonempty(*values: str | None) -> str:
+    for value in values:
+        text = str(value or '').strip()
+        if text:
+            return text
+    return ''
+
+
+def _parse_env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        value = default
+    else:
+        try:
+            value = int(str(raw).strip())
+        except ValueError:
+            _ENV_PARSE_WARNINGS.append(f"{name}={raw!r} 不是合法整数，已回退默认值 {default}")
+            value = default
+    if minimum is not None and value < minimum:
+        _ENV_PARSE_WARNINGS.append(f"{name}={value} 小于最小值 {minimum}，已自动提升")
+        value = minimum
+    return value
+
 
 # ==================== 环境变量配置 ====================
 # Telegram Bot
@@ -37,12 +94,13 @@ HDHIVE_PARSE_INCOMING_LINKS = os.getenv("HDHIVE_PARSE_INCOMING_LINKS", "1").stri
 TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
 
 # 权限控制
-ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
-TARGET_GROUP_ID = int(os.getenv("TARGET_GROUP_ID", "0"))  # 已废弃，保留兼容
+BOT_USER_ID_RAW = _pick_first_nonempty(os.getenv("bot_user_id"), os.getenv("BOT_USER_ID"))
+BOT_USER_IDS = _parse_int_csv(BOT_USER_ID_RAW)
+BOT_USER_ID_SET = set(BOT_USER_IDS)
 
 # 自动解锁配置
-AUTO_UNLOCK_THRESHOLD = int(os.getenv("AUTO_UNLOCK_THRESHOLD", "0"))  # 0=禁用自动解锁，>0=自动解锁的积分阈值
-HDHIVE_UNLOCK_RATE_LIMIT_PER_SECOND = max(1, int(os.getenv("HDHIVE_UNLOCK_RATE_LIMIT_PER_SECOND", "3")))  # HDHive 解锁限速，默认 1 秒最多 3 次
+AUTO_UNLOCK_THRESHOLD = _parse_env_int("AUTO_UNLOCK_THRESHOLD", 0, minimum=0)  # 0=禁用自动解锁，>0=自动解锁的积分阈值
+HDHIVE_UNLOCK_RATE_LIMIT_PER_SECOND = _parse_env_int("HDHIVE_UNLOCK_RATE_LIMIT_PER_SECOND", 3, minimum=1)  # HDHive 解锁限速，默认 1 秒最多 3 次
 
 # 自动签到配置
 CHECKIN_CRON = os.getenv("CHECKIN_CRON", "").strip()  # 5段cron表达式，留空则禁用
@@ -52,16 +110,21 @@ CHECKIN_GAMBLE = os.getenv("CHECKIN_GAMBLE", "0").strip().lower() in ("1", "true
 # Symedia 集成 (可选)
 SA_URL = os.getenv("SA_URL", "")
 SA_PARENT_ID = os.getenv("SA_PARENT_ID", "")
-SA_AUTO_ADD_DELAY = int(os.getenv("SA_AUTO_ADD_DELAY", "60"))
+SA_AUTO_ADD_DELAY = _parse_env_int("SA_AUTO_ADD_DELAY", 60, minimum=0)
 SA_ENABLE_115_PUSH = os.getenv("SA_ENABLE_115_PUSH", "1").strip().lower() in ("1", "true", "yes", "on")
 SA_TOKEN = os.getenv("SA_TOKEN", "symedia").strip() or "symedia"
 
 # 日志文件路径（兼容旧变量 HDHIVE_LOG_PATH）
-LOG_PATH = os.getenv("MEDIA_BOT_LOG_PATH", os.getenv("HDHIVE_LOG_PATH", "media_bot.log"))
+_raw_log_path = os.getenv("MEDIA_BOT_LOG_PATH", os.getenv("HDHIVE_LOG_PATH", "media_bot.log"))
+if str(_raw_log_path).strip() in ("", "0", "false", "False", "none", "None"):
+    LOG_PATH = "media_bot.log"
+else:
+    LOG_PATH = str(_raw_log_path).strip()
 
-# STRM Telegram 通知目标（可选）
-# 支持用户、群组、频道 Chat ID；留空则不发送 STRM 通知
-TGBOT_NOTIFY_CHAT_ID = os.getenv("TGBOT_NOTIFY_CHAT_ID", "").strip()
+# Telegram 通知目标
+BOT_CHAT_ID_RAW = _pick_first_nonempty(os.getenv("bot_chat_id"), os.getenv("BOT_CHAT_ID"))
+BOT_CHAT_IDS = _split_csv_env(BOT_CHAT_ID_RAW)
+BOT_CHAT_ID = BOT_CHAT_IDS[0] if BOT_CHAT_IDS else ''
 
 # STRM 监控配置
 STRM_WATCH_ENABLED = os.getenv("STRM_WATCH_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
@@ -70,17 +133,17 @@ STRM_WATCH_DIR = os.getenv("STRM_WATCH_DIR", "").strip()
 STRM_DONE_DIR = os.getenv("STRM_DONE_DIR", "").strip()
 STRM_FAILED_DIR = os.getenv("STRM_FAILED_DIR", "").strip()
 STRM_STATE_DIR = os.getenv("STRM_STATE_DIR", "/app/data/strm_state").strip() or "/app/data/strm_state"
-STRM_PROCESSING_LEASE_SECONDS = int(os.getenv("STRM_PROCESSING_LEASE_SECONDS", "1800"))
-STRM_STATE_RETENTION_HOURS = int(os.getenv("STRM_STATE_RETENTION_HOURS", "168"))
-STRM_MAX_WORKERS = int(os.getenv("STRM_MAX_WORKERS", "3"))
-STRM_TIMEOUT_S = int(os.getenv("STRM_TIMEOUT_S", "60"))
-STRM_MAX_RETRIES = int(os.getenv("STRM_MAX_RETRIES", "2"))
-STRM_RW_TIMEOUT_US = int(os.getenv("STRM_RW_TIMEOUT_US", "15000000"))
+STRM_PROCESSING_LEASE_SECONDS = _parse_env_int("STRM_PROCESSING_LEASE_SECONDS", 1800, minimum=1)
+STRM_STATE_RETENTION_HOURS = _parse_env_int("STRM_STATE_RETENTION_HOURS", 168)
+STRM_MAX_WORKERS = _parse_env_int("STRM_MAX_WORKERS", 3, minimum=1)
+STRM_TIMEOUT_S = _parse_env_int("STRM_TIMEOUT_S", 60, minimum=1)
+STRM_MAX_RETRIES = _parse_env_int("STRM_MAX_RETRIES", 2, minimum=0)
+STRM_RW_TIMEOUT_US = _parse_env_int("STRM_RW_TIMEOUT_US", 15000000, minimum=0)
 STRM_PROBESIZE = os.getenv("STRM_PROBESIZE", "12M").strip() or "12M"
 STRM_ANALYZEDURATION = os.getenv("STRM_ANALYZEDURATION", "3000000").strip() or "3000000"
-STRM_RECENT_EVENT_TTL = int(os.getenv("STRM_RECENT_EVENT_TTL", "10"))
-STRM_IDLE_SECONDS = int(os.getenv("STRM_IDLE_SECONDS", "30"))
-STRM_MIN_FOLDER_AGE_SECONDS = int(os.getenv("STRM_MIN_FOLDER_AGE_SECONDS", "60"))
+STRM_RECENT_EVENT_TTL = _parse_env_int("STRM_RECENT_EVENT_TTL", 10, minimum=0)
+STRM_IDLE_SECONDS = _parse_env_int("STRM_IDLE_SECONDS", 30, minimum=0)
+STRM_MIN_FOLDER_AGE_SECONDS = _parse_env_int("STRM_MIN_FOLDER_AGE_SECONDS", 60, minimum=0)
 STRM_ONLY_FIRST_LEVEL_DIR = os.getenv("STRM_ONLY_FIRST_LEVEL_DIR", "1").strip().lower() in ("1", "true", "yes", "on")
 
 STRM_SETTINGS = StrmSettings(
@@ -129,8 +192,8 @@ def validate_config():
         errors.append("未配置 HDHIVE_API_KEY")
     
     # 可选配置警告
-    if ALLOWED_USER_ID == 0:
-        warnings.append("未配置 ALLOWED_USER_ID，任何人都可以使用机器人！")
+    if not BOT_USER_IDS:
+        warnings.append("未配置 bot_user_id，任何人都可以使用机器人！")
     
     if not SA_URL or not SA_PARENT_ID:
         warnings.append("未配置 SA_URL 或 SA_PARENT_ID，无法自动添加到Symedia。")
@@ -146,7 +209,7 @@ def validate_config():
     
     if CHECKIN_CRON:
         warnings.append(
-            f"已启用自动签到: cron={CHECKIN_CRON}, timezone={CHECKIN_TIMEZONE}, notify_chat_id={ALLOWED_USER_ID or '未配置'}"
+            f"已启用自动签到: cron={CHECKIN_CRON}, timezone={CHECKIN_TIMEZONE}, notify_chat_id={BOT_CHAT_IDS or BOT_USER_IDS or '未配置'}"
         )
     if STRM_WATCH_ENABLED:
         missing = []
@@ -164,8 +227,8 @@ def validate_config():
             warnings.append(
                 f"已启用 STRM 监控: watch={STRM_WATCH_DIR}, done={STRM_DONE_DIR}, failed={STRM_FAILED_DIR}, state={STRM_STATE_DIR}"
             )
-            if TGBOT_NOTIFY_CHAT_ID:
-                warnings.append(f"已启用 STRM Telegram 通知: chat_id={TGBOT_NOTIFY_CHAT_ID}")
+            if BOT_CHAT_IDS:
+                warnings.append(f"已启用 STRM Telegram 通知: chat_ids={BOT_CHAT_IDS}")
 
     if STRM_PRUNE_SETTINGS.enabled:
         warnings.append(
@@ -187,6 +250,12 @@ def validate_config():
     if warnings:
         print("⚠️ 配置警告:")
         for warning in warnings:
+            print(f"   - {warning}")
+        print()
+
+    if _ENV_PARSE_WARNINGS:
+        print("⚠️ 配置解析修正:")
+        for warning in _ENV_PARSE_WARNINGS:
             print(f"   - {warning}")
         print()
     

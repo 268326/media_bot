@@ -315,8 +315,8 @@ def format_unlock_confirmation(resource_id: str, points: int, user_points: int |
 
     if user_points is None:
         text += (
-            f"💳 当前积分: <code>未知</code>\n\n"
-            f"⚠️ 当前无法读取积分信息，确认后将直接尝试解锁。"
+            "💳 当前积分: <code>未知</code>\n\n"
+            "⚠️ 当前无法读取积分信息，确认后将直接尝试解锁。"
         )
     else:
         text += (

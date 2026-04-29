@@ -22,8 +22,6 @@ from strm_notifier import strm_notifier
 from strm_probe import read_strm_url, run_ffprobe
 from strm_reason import (
     BATCH_STATUS_ACTIVE,
-    BLOCKING_ITEM_STATUSES,
-    DISAPPEARED_BEFORE_COMPLETION,
     FFPROBE_FAILED,
     INVALID_STRM_URL,
     MOVE_DONE_FILE_ERROR,
@@ -31,7 +29,6 @@ from strm_reason import (
     MOVE_FAILED_STRM_ERROR,
     NAME_CONFLICT,
     NOT_A_DIRECTORY,
-    PROCESSING_LEASE_EXPIRED,
     RENAME_ERROR,
     SOURCE_MISSING,
     STATUS_ALREADY_OK,

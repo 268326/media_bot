@@ -6,7 +6,6 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Optional
 from urllib.parse import urlparse, parse_qs
 
 import aiohttp

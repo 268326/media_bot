@@ -15,6 +15,12 @@ services:
       - ./data:/app/data
       - ${ASS_TARGET_HOST_DIR:-./data/ass_target}:${ASS_TARGET_DIR:-/ass_target}
       - ${ASS_MUX_TARGET_HOST_DIR:-./data/ass_mux_target}:${ASS_MUX_TARGET_DIR:-/ass_mux_target}
+    healthcheck:
+      test: ["CMD", "python", "main.py", "--healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     shm_size: '2gb'
     logging:
       driver: "json-file"
