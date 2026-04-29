@@ -1209,9 +1209,9 @@ async def callback_ass_menu(callback: CallbackQuery):
         return
 
     if action == "mux_start":
-        await callback.answer("开始创建字幕内封会话…")
+        await callback.answer("开始创建自动字幕内封会话…")
         try:
-            await ass_service.start_mux_session(chat_id=msg.chat.id, owner_user_id=callback.from_user.id)
+            await ass_service.start_mux_session(chat_id=msg.chat.id, owner_user_id=callback.from_user.id, mode="auto")
             panel_text = await ass_service.build_mux_panel_text(msg.chat.id, callback.from_user.id)
             kb = ass_service.build_mux_plan_keyboard(msg.chat.id, callback.from_user.id)
             await msg.edit_text(panel_text, reply_markup=kb, parse_mode="HTML")
@@ -1224,6 +1224,24 @@ async def callback_ass_menu(callback: CallbackQuery):
         except Exception as exc:
             logging.exception("❌ 创建 /ass 字幕内封会话失败")
             await msg.edit_text(f"❌ 创建字幕内封会话失败\n\n<code>{html.escape(str(exc))}</code>", parse_mode="HTML")
+        return
+
+    if action == "mux_manual_start":
+        await callback.answer("开始创建手动字幕内封会话…")
+        try:
+            await ass_service.start_mux_session(chat_id=msg.chat.id, owner_user_id=callback.from_user.id, mode="manual")
+            panel_text = await ass_service.build_mux_panel_text(msg.chat.id, callback.from_user.id)
+            kb = ass_service.build_mux_plan_keyboard(msg.chat.id, callback.from_user.id)
+            await msg.edit_text(panel_text, reply_markup=kb, parse_mode="HTML")
+            ass_service.bind_mux_message_ids(
+                msg.chat.id,
+                callback.from_user.id,
+                panel_message_id=msg.message_id,
+            )
+            await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
+        except Exception as exc:
+            logging.exception("❌ 创建 /ass 手动字幕内封会话失败")
+            await msg.edit_text(f"❌ 创建手动字幕内封会话失败\n\n<code>{html.escape(str(exc))}</code>", parse_mode="HTML")
         return
 
     await callback.answer()
@@ -1345,6 +1363,52 @@ async def callback_ass_mux(callback: CallbackQuery):
             await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
             return
 
+        if payload.startswith("open_add_sub_picker:"):
+            _, item_raw = payload.split(":", 1)
+            item_index = int(item_raw)
+            ass_service.prepare_mux_add_sub_picker(msg.chat.id, callback.from_user.id, item_index)
+            ass_service.clear_mux_inline_notice(msg.chat.id, callback.from_user.id)
+            await callback.answer("打开字幕候选列表")
+            text = ass_service.format_mux_add_sub_picker(msg.chat.id, callback.from_user.id, item_index)
+            kb = ass_service.build_mux_add_sub_picker_keyboard(msg.chat.id, callback.from_user.id, item_index)
+            await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            return
+
+        if payload.startswith("prompt_add_sub:"):
+            _, item_raw = payload.split(":", 1)
+            item_index = int(item_raw)
+            session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
+            ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="add_sub_file", item_index=item_index, message_id=session.awaiting_message_id if session and session.awaiting_message_id else msg.message_id)
+            ass_service.clear_mux_inline_notice(msg.chat.id, callback.from_user.id)
+            await callback.answer("请直接发送要添加的字幕文件名")
+            await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
+            return
+
+        if payload.startswith("add_sub_page:"):
+            _, item_raw, page_raw = payload.split(":", 2)
+            item_index = int(item_raw)
+            page = int(page_raw)
+            ass_service.set_mux_add_sub_picker_page(msg.chat.id, callback.from_user.id, page)
+            text = ass_service.format_mux_add_sub_picker(msg.chat.id, callback.from_user.id, item_index)
+            kb = ass_service.build_mux_add_sub_picker_keyboard(msg.chat.id, callback.from_user.id, item_index)
+            await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            await callback.answer()
+            return
+
+        if payload.startswith("toggle_add_sub:"):
+            _, candidate_raw = payload.split(":", 1)
+            candidate_index = int(candidate_raw)
+            session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
+            if not session or session.selected_item_index is None:
+                raise RuntimeError("当前未选中视频项，请重新进入单集编辑")
+            item_index = session.selected_item_index
+            ass_service.toggle_mux_add_sub_candidate(msg.chat.id, callback.from_user.id, candidate_index)
+            text = ass_service.format_mux_add_sub_picker(msg.chat.id, callback.from_user.id, item_index)
+            kb = ass_service.build_mux_add_sub_picker_keyboard(msg.chat.id, callback.from_user.id, item_index)
+            await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            await callback.answer()
+            return
+
         if payload.startswith("prompt_subfile:"):
             _, item_raw, sub_raw = payload.split(":", 2)
             item_index = int(item_raw)
@@ -1356,6 +1420,32 @@ async def callback_ass_mux(callback: CallbackQuery):
             await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
             return
 
+        if payload.startswith("confirm_add_sub:"):
+            _, item_raw = payload.split(":", 1)
+            item_index = int(item_raw)
+            result_text = ass_service.confirm_mux_add_sub_candidates(msg.chat.id, callback.from_user.id)
+            ass_service.set_mux_inline_notice(msg.chat.id, callback.from_user.id, result_text)
+            await callback.answer("已批量添加字幕")
+            text = ass_service.format_mux_item_detail(msg.chat.id, callback.from_user.id, item_index)
+            kb = ass_service.build_mux_item_keyboard(msg.chat.id, callback.from_user.id, item_index)
+            await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            return
+
+        if payload.startswith("pick_add_sub:"):
+            _, candidate_raw = payload.split(":", 1)
+            candidate_index = int(candidate_raw)
+            session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
+            if not session or session.selected_item_index is None:
+                raise RuntimeError("当前未选中视频项，请重新进入单集编辑")
+            item_index = session.selected_item_index
+            result_text = ass_service.pick_mux_add_sub_candidate(msg.chat.id, callback.from_user.id, candidate_index)
+            ass_service.set_mux_inline_notice(msg.chat.id, callback.from_user.id, result_text)
+            await callback.answer("已添加该字幕")
+            text = ass_service.format_mux_item_detail(msg.chat.id, callback.from_user.id, item_index)
+            kb = ass_service.build_mux_item_keyboard(msg.chat.id, callback.from_user.id, item_index)
+            await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            return
+
         if payload.startswith("prompt_subgroup:"):
             _, item_raw, sub_raw = payload.split(":", 2)
             item_index = int(item_raw)
@@ -1365,6 +1455,18 @@ async def callback_ass_mux(callback: CallbackQuery):
             ass_service.clear_mux_inline_notice(msg.chat.id, callback.from_user.id)
             await callback.answer("请直接发送字幕组")
             await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
+            return
+
+        if payload.startswith("remove_sub:"):
+            _, item_raw, sub_raw = payload.split(":", 2)
+            item_index = int(item_raw)
+            sub_index = int(sub_raw)
+            result_text = ass_service.remove_mux_subtitle_from_item(msg.chat.id, callback.from_user.id, item_index, sub_index)
+            ass_service.set_mux_inline_notice(msg.chat.id, callback.from_user.id, result_text)
+            await callback.answer("已删除该字幕")
+            text = ass_service.format_mux_item_detail(msg.chat.id, callback.from_user.id, item_index)
+            kb = ass_service.build_mux_item_keyboard(msg.chat.id, callback.from_user.id, item_index)
+            await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
             return
 
         if payload.startswith("prompt_sublang:"):

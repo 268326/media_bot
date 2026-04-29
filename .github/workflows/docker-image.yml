@@ -7,6 +7,11 @@ on:
       - master
     tags:
       - "v*"
+    paths-ignore:
+      - "*.md"
+      - "**/*.md"
+      - ".env.example"
+      - "文档/**"
   workflow_dispatch:
 
 permissions:

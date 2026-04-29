@@ -49,8 +49,13 @@ def format_mux_menu(settings: Any) -> str:
         '</blockquote>',
         '',
         '<blockquote>',
-        '🎞️ <b>内封字幕</b>',
-        '把同目录匹配到的 <code>.ass/.sup</code> 内封进 <code>.mkv</code>',
+        '🎞️ <b>自动内封字幕</b>',
+        '把同目录自动匹配到的 <code>.ass/.sup</code> 内封进 <code>.mkv</code>',
+        '</blockquote>',
+        '',
+        '<blockquote>',
+        '🧩 <b>手动内封字幕</b>',
+        '先列出视频，再手动为每个视频挑选要内封的字幕文件',
         '</blockquote>',
         '',
         f'📂 目录: <code>{html.escape(str(settings.target_dir))}</code>',
@@ -64,15 +69,20 @@ def build_mux_menu_keyboard(menu_prefix: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text='🔤 子集化字体', callback_data=f'{menu_prefix}subset'),
-            InlineKeyboardButton(text='🎞️ 内封字幕', callback_data=f'{menu_prefix}mux_start'),
-        ]
+        ],
+        [
+            InlineKeyboardButton(text='🎞️ 自动内封', callback_data=f'{menu_prefix}mux_start'),
+            InlineKeyboardButton(text='🧩 手动内封', callback_data=f'{menu_prefix}mux_manual_start'),
+        ],
     ])
 
 
 def format_mux_session(session: Any) -> str:
+    mode_label = '手动' if getattr(session, 'mode', 'auto') == 'manual' else '自动'
     lines = [
         '🎛️ <b>/ass · 字幕内封控制面板</b>',
         '─────────────────',
+        f'🧩 模式: <code>{mode_label}</code>',
         f'📂 目录: <code>{html.escape(str(session.settings.target_dir))}</code>',
         f'🔁 扫描: <code>{session.settings.recursive}</code> · ⚙️ 并发: <code>{session.settings.jobs}</code>',
         f'🌐 默认语言: <code>{html.escape(session.default_lang)}</code>',
@@ -235,8 +245,12 @@ def build_mux_preview_keyboard(session: Any, total_pages: int, mux_prefix: str) 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_mux_item_keyboard(item: Any, item_index: int, mux_prefix: str) -> InlineKeyboardMarkup:
+def build_mux_item_keyboard(item: Any, item_index: int, mux_prefix: str, *, manual_mode: bool = False, use_picker: bool = False) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+    if manual_mode:
+        rows.append([
+            InlineKeyboardButton(text='➕ 添加字幕文件', callback_data=f'{mux_prefix}{"open_add_sub_picker" if use_picker else "prompt_add_sub"}:{item_index}'),
+        ])
     for sub_index, _sub in enumerate(item.subs, 1):
         rows.append([
             InlineKeyboardButton(text=f'改字幕 {sub_index} 文件', callback_data=f'{mux_prefix}prompt_subfile:{item_index}:{sub_index - 1}'),
@@ -245,8 +259,66 @@ def build_mux_item_keyboard(item: Any, item_index: int, mux_prefix: str) -> Inli
             InlineKeyboardButton(text=f'改字幕 {sub_index} 字幕组', callback_data=f'{mux_prefix}prompt_subgroup:{item_index}:{sub_index - 1}'),
             InlineKeyboardButton(text=f'改字幕 {sub_index} 语言', callback_data=f'{mux_prefix}prompt_sublang:{item_index}:{sub_index - 1}'),
         ])
+        if manual_mode:
+            rows.append([
+                InlineKeyboardButton(text=f'🗑️ 删除字幕 {sub_index}', callback_data=f'{mux_prefix}remove_sub:{item_index}:{sub_index - 1}'),
+            ])
     rows.append([InlineKeyboardButton(text='⬅️ 返回计划列表', callback_data=f'{mux_prefix}back_plan')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_mux_add_sub_picker_keyboard(item_index: int, candidates: list[str], selected_indexes: set[int], current_page: int, total_pages: int, mux_prefix: str, *, page_size: int = 6) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    start = current_page * page_size
+    page_items = candidates[start:start + page_size]
+    button_row: list[InlineKeyboardButton] = []
+    for idx, _name in enumerate(page_items):
+        actual_index = start + idx
+        picked = actual_index in selected_indexes
+        label = f'{"✅" if picked else "☑️"}{idx + 1}'
+        button_row.append(InlineKeyboardButton(text=label, callback_data=f'{mux_prefix}toggle_add_sub:{actual_index}'))
+        if len(button_row) == 3:
+            rows.append(button_row)
+            button_row = []
+    if button_row:
+        rows.append(button_row)
+    rows.append([
+        InlineKeyboardButton(text=f'✅ 确认添加({len(selected_indexes)})', callback_data=f'{mux_prefix}confirm_add_sub:{item_index}'),
+    ])
+    if total_pages > 1:
+        nav_row: list[InlineKeyboardButton] = []
+        if current_page > 0:
+            nav_row.append(InlineKeyboardButton(text='⬅️', callback_data=f'{mux_prefix}add_sub_page:{item_index}:{current_page - 1}'))
+        nav_row.append(InlineKeyboardButton(text=f'候选 {current_page + 1}/{total_pages}', callback_data=f'{mux_prefix}add_sub_page:{item_index}:{current_page}'))
+        if current_page < total_pages - 1:
+            nav_row.append(InlineKeyboardButton(text='➡️', callback_data=f'{mux_prefix}add_sub_page:{item_index}:{current_page + 1}'))
+        rows.append(nav_row)
+    rows.append([InlineKeyboardButton(text='⬅️ 返回单集编辑', callback_data=f'{mux_prefix}edit_item:{item_index}')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def format_mux_add_sub_picker(item: Any, item_index: int, candidates: list[str], selected_indexes: set[int], current_page: int, total_pages: int, *, page_size: int = 6) -> str:
+    lines = [
+        f'➕ <b>选择要添加的字幕 · 第 {item_index + 1} 项</b>',
+        '─────────────────',
+        f'🎬 MKV: <code>{html.escape(item.mkv)}</code>',
+    ]
+    if not candidates:
+        lines.extend(['', '<blockquote>当前目录下没有可添加的候选字幕，或已全部添加。</blockquote>'])
+        return join_lines_for_tg(lines)
+    start = current_page * page_size
+    page_items = candidates[start:start + page_size]
+    lines.extend([
+        '',
+        f'第 <code>{current_page + 1}</code>/<code>{total_pages}</code> 页 · 当前 <code>{len(page_items)}</code> 条候选',
+        f'已选择: <code>{len(selected_indexes)}</code> 个（点数字切换勾选）',
+        '',
+    ])
+    for idx, name in enumerate(page_items, 1):
+        actual_index = start + idx - 1
+        picked = actual_index in selected_indexes
+        lines.append(f'{"✅" if picked else "☑️"}{idx}. <code>{html.escape(name)}</code>')
+    return join_lines_for_tg(lines)
 
 
 def build_mux_run_confirm_keyboard(mux_prefix: str) -> InlineKeyboardMarkup:
@@ -300,6 +372,11 @@ def format_mux_item_detail(item: Any, item_index: int) -> str:
         '─────────────────',
         f'🎬 MKV: <code>{html.escape(item.mkv)}</code>',
     ]
+    if not item.subs:
+        lines.extend([
+            '',
+            '<blockquote>当前还没有为这个视频选择任何字幕文件。</blockquote>',
+        ])
     for idx, sub in enumerate(item.subs, 1):
         lines.extend([
             '',

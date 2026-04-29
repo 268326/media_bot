@@ -315,6 +315,47 @@ def build_mux_plan(settings: AssMuxSettings, *, default_group: str | None = None
     )
 
 
+def build_manual_mux_plan(settings: AssMuxSettings, *, default_group: str | None = None, default_lang: str | None = None) -> MuxPlan:
+    target_dir = settings.target_dir.expanduser().resolve()
+    if not target_dir.is_dir():
+        raise AssPipelineError(f"ASS_MUX_TARGET_DIR 不存在: {target_dir}")
+
+    group = settings.default_group if default_group is None else default_group.strip()
+    lang_raw = settings.default_lang if default_lang is None else (default_lang.strip() or settings.default_lang)
+
+    mkvs = _iter_files(target_dir, settings.recursive, (".mkv",))
+    if not mkvs:
+        raise AssPipelineError(f"目录中未找到 MKV: {target_dir}")
+
+    sub_files = _iter_files(target_dir, settings.recursive, (".ass", ".sup"))
+    if not sub_files:
+        raise AssPipelineError(f"目录中未找到 ASS/SUP 字幕: {target_dir}")
+
+    items = [
+        MuxPlanItem(
+            mkv=str(mkv.relative_to(target_dir)),
+            subs=[],
+        )
+        for mkv in mkvs
+    ]
+
+    return MuxPlan(
+        generated_at=datetime.now().isoformat(timespec="seconds"),
+        target_dir=str(target_dir),
+        defaults={"group": group, "lang": lang_raw},
+        items=items,
+        total_mkvs=len(mkvs),
+        matched_mkvs=0,
+        total_sub_tracks=0,
+    )
+
+
+def recount_mux_plan(plan: MuxPlan) -> MuxPlan:
+    plan.matched_mkvs = sum(1 for item in plan.items if item.subs)
+    plan.total_sub_tracks = sum(len(item.subs) for item in plan.items)
+    return plan
+
+
 def mux_plan_to_dict(plan: MuxPlan) -> dict:
     return asdict(plan)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import threading
 import time
@@ -12,6 +13,7 @@ from aiogram import Bot
 from aiogram.types import Message, InlineKeyboardMarkup
 
 from ass_formatter import (
+    build_mux_add_sub_picker_keyboard,
     build_mux_item_keyboard,
     build_mux_menu_keyboard,
     build_mux_plan_keyboard,
@@ -20,6 +22,7 @@ from ass_formatter import (
     format_default_group_updated,
     format_default_lang_updated,
     format_jobs_updated,
+    format_mux_add_sub_picker,
     format_mux_error,
     format_mux_item_detail,
     format_mux_menu,
@@ -43,9 +46,13 @@ from ass_mux_planner import (
     MuxPlan,
     MuxPlanItem,
     SubtitleTrackPlan,
+    build_manual_mux_plan,
     build_mux_plan,
+    build_track_name,
     format_mux_plan_preview,
+    infer_lang_raw_from_subtitle_name,
     parse_lang,
+    recount_mux_plan,
     short_ep_display,
     short_title_from_mkv,
     write_mux_plan,
@@ -67,6 +74,7 @@ class AssMuxSession:
     owner_user_id: int
     settings: AssMuxSettings
     plan: MuxPlan | None = None
+    mode: str = "auto"
     default_group: str = ""
     default_lang: str = "chs"
     delete_external_subs: bool = False
@@ -80,6 +88,9 @@ class AssMuxSession:
     awaiting_message_id: int | None = None
     preview_message_id: int | None = None
     inline_notice: str = ""
+    add_sub_candidates: list[str] = field(default_factory=list)
+    add_sub_selected_indexes: set[int] = field(default_factory=set)
+    add_sub_page: int = 0
     created_at: float = field(default_factory=time.monotonic)
     updated_at: float = field(default_factory=time.monotonic)
 
@@ -127,13 +138,14 @@ class AssService:
         settings = load_ass_mux_settings_from_env()
         return format_mux_menu(settings), build_mux_menu_keyboard(ASS_MENU_PREFIX)
 
-    async def start_mux_session(self, *, chat_id: int, owner_user_id: int) -> AssMuxSession:
+    async def start_mux_session(self, *, chat_id: int, owner_user_id: int, mode: str = "auto") -> AssMuxSession:
         self.cleanup_mux_sessions()
         settings = load_ass_mux_settings_from_env()
         session = AssMuxSession(
             chat_id=chat_id,
             owner_user_id=owner_user_id,
             settings=settings,
+            mode=mode if mode in ("auto", "manual") else "auto",
             default_group=settings.default_group,
             default_lang=settings.default_lang,
             delete_external_subs=settings.delete_external_subs_default,
@@ -141,7 +153,7 @@ class AssService:
             preview_page=0,
         )
         self.mux_sessions[self._session_key(chat_id, owner_user_id)] = session
-        logger.info('🎬 创建 /ass 字幕内封会话: chat_id=%s user_id=%s target=%s', chat_id, owner_user_id, settings.target_dir)
+        logger.info('🎬 创建 /ass 字幕内封会话: chat_id=%s user_id=%s mode=%s target=%s', chat_id, owner_user_id, session.mode, settings.target_dir)
         return session
 
     def get_mux_session(self, chat_id: int, owner_user_id: int | None = None) -> AssMuxSession | None:
@@ -257,6 +269,8 @@ class AssService:
             return '🌐 <b>当前等待输入：默认语言</b>\n请输入例如：<code>chs</code> / <code>cht</code> / <code>eng</code> / <code>chs_eng</code>\n• 输入后请点“重新扫描”生效'
         if field == 'jobs':
             return '⚙️ <b>当前等待输入：并发数</b>\n请输入正整数，例如：<code>1</code> / <code>2</code> / <code>4</code>\n• 修改后立即用于本次会话执行'
+        if field == 'add_sub_file':
+            return '➕ <b>当前等待输入：要添加的字幕文件名</b>\n请输入同目录字幕文件名（只输入文件名，不要带路径）'
         if field == 'sub_file':
             return '📄 <b>当前等待输入：字幕文件名</b>\n请输入新的字幕文件名（只输入文件名，不要带路径）'
         if field == 'track_group':
@@ -284,19 +298,20 @@ class AssService:
         if not session:
             raise AssPipelineError('当前没有进行中的字幕内封会话，请重新发送 /ass')
         session.touch()
+        builder = build_manual_mux_plan if session.mode == 'manual' else build_mux_plan
         plan = await asyncio.to_thread(
-            build_mux_plan,
+            builder,
             session.settings,
             default_group=session.default_group,
             default_lang=session.default_lang,
         )
-        session.plan = plan
+        session.plan = recount_mux_plan(plan)
         session.plan_page = 0
         session.preview_page = 0
         session.preview_mode = "summary"
-        write_mux_plan(plan, session.settings.plan_path.expanduser().resolve())
-        logger.info('🎬 /ass 生成字幕内封计划: chat_id=%s items=%s tracks=%s plan=%s', chat_id, len(plan.items), plan.total_sub_tracks, session.settings.plan_path)
-        text = format_mux_plan_preview(plan)
+        write_mux_plan(session.plan, session.settings.plan_path.expanduser().resolve())
+        logger.info('🎬 /ass 生成字幕内封计划: chat_id=%s mode=%s items=%s tracks=%s plan=%s', chat_id, session.mode, len(session.plan.items), session.plan.total_sub_tracks, session.settings.plan_path)
+        text = format_mux_plan_preview(session.plan)
         return session, text
 
 
@@ -340,7 +355,26 @@ class AssService:
         if not session or not session.plan:
             raise AssPipelineError('当前还没有生成计划')
         item = session.plan.items[item_index]
-        return build_mux_item_keyboard(item, item_index, ASS_MUX_PREFIX)
+        return build_mux_item_keyboard(item, item_index, ASS_MUX_PREFIX, manual_mode=(session.mode == 'manual'), use_picker=(session.mode == 'manual'))
+
+    def build_mux_add_sub_picker_keyboard(self, chat_id: int, owner_user_id: int, item_index: int) -> InlineKeyboardMarkup:
+        session = self.get_mux_session(chat_id, owner_user_id)
+        if not session or not session.plan:
+            raise AssPipelineError('当前还没有生成计划')
+        candidates = session.add_sub_candidates
+        total_pages = max(1, (len(candidates) + 6 - 1) // 6)
+        session.add_sub_page = min(max(session.add_sub_page, 0), total_pages - 1)
+        return build_mux_add_sub_picker_keyboard(item_index, candidates, session.add_sub_selected_indexes, session.add_sub_page, total_pages, ASS_MUX_PREFIX)
+
+    def format_mux_add_sub_picker(self, chat_id: int, owner_user_id: int, item_index: int) -> str:
+        session = self.get_mux_session(chat_id, owner_user_id)
+        if not session or not session.plan:
+            raise AssPipelineError('当前还没有生成计划')
+        item = session.plan.items[item_index]
+        candidates = session.add_sub_candidates
+        total_pages = max(1, (len(candidates) + 6 - 1) // 6)
+        session.add_sub_page = min(max(session.add_sub_page, 0), total_pages - 1)
+        return format_mux_add_sub_picker(item, item_index, candidates, session.add_sub_selected_indexes, session.add_sub_page, total_pages)
 
     def build_mux_run_confirm_keyboard(self) -> InlineKeyboardMarkup:
         return build_mux_run_confirm_keyboard(ASS_MUX_PREFIX)
@@ -373,6 +407,146 @@ class AssService:
                 candidates.append(path.name)
         return candidates
 
+    def list_mux_available_subs_for_item(self, chat_id: int, owner_user_id: int, item_index: int) -> list[str]:
+        session = self.get_mux_session(chat_id, owner_user_id)
+        if not session or not session.plan:
+            raise AssPipelineError('当前还没有生成计划')
+        item = session.plan.items[item_index]
+        current_files = {Path(sub.file).name for sub in item.subs}
+        return [name for name in self.list_mux_candidate_subs(chat_id, owner_user_id, item_index) if name not in current_files]
+
+    def prepare_mux_add_sub_picker(self, chat_id: int, owner_user_id: int, item_index: int) -> list[str]:
+        session = self.get_mux_session(chat_id, owner_user_id)
+        if not session:
+            raise AssPipelineError('当前没有进行中的字幕内封会话，请重新发送 /ass')
+        candidates = self.list_mux_available_subs_for_item(chat_id, owner_user_id, item_index)
+        session.selected_item_index = item_index
+        session.selected_sub_index = None
+        session.awaiting_field = 'add_sub_pick'
+        session.add_sub_candidates = candidates
+        session.add_sub_selected_indexes = set()
+        session.add_sub_page = 0
+        session.touch()
+        return candidates
+
+    def set_mux_add_sub_picker_page(self, chat_id: int, owner_user_id: int, page: int) -> None:
+        session = self.get_mux_session(chat_id, owner_user_id)
+        if not session:
+            raise AssPipelineError('当前没有进行中的字幕内封会话，请重新发送 /ass')
+        session.add_sub_page = max(0, page)
+        session.touch()
+
+    def toggle_mux_add_sub_candidate(self, chat_id: int, owner_user_id: int, candidate_index: int) -> None:
+        session = self.get_mux_session(chat_id, owner_user_id)
+        if not session:
+            raise AssPipelineError('当前没有进行中的字幕内封会话，请重新发送 /ass')
+        if session.awaiting_field != 'add_sub_pick':
+            raise AssPipelineError('当前不在按钮选字幕状态，请重新进入单集编辑')
+        if candidate_index < 0 or candidate_index >= len(session.add_sub_candidates):
+            raise AssPipelineError('选中的字幕候选不存在，请重新打开候选列表')
+        if candidate_index in session.add_sub_selected_indexes:
+            session.add_sub_selected_indexes.remove(candidate_index)
+        else:
+            session.add_sub_selected_indexes.add(candidate_index)
+        session.touch()
+
+    def confirm_mux_add_sub_candidates(self, chat_id: int, owner_user_id: int) -> str:
+        session = self.get_mux_session(chat_id, owner_user_id)
+        if not session:
+            raise AssPipelineError('当前没有进行中的字幕内封会话，请重新发送 /ass')
+        if session.awaiting_field != 'add_sub_pick':
+            raise AssPipelineError('当前不在按钮选字幕状态，请重新进入单集编辑')
+        if session.selected_item_index is None:
+            raise AssPipelineError('当前未选中视频项，请重新进入单集编辑')
+        if not session.add_sub_selected_indexes:
+            raise AssPipelineError('请至少选择一个字幕文件')
+
+        selected_indexes = sorted(session.add_sub_selected_indexes)
+        added_names: list[str] = []
+        for candidate_index in selected_indexes:
+            try:
+                candidate = session.add_sub_candidates[candidate_index]
+            except IndexError as exc:
+                raise AssPipelineError('选中的字幕候选不存在，请重新打开候选列表') from exc
+            self.add_mux_subtitle_to_item(chat_id, owner_user_id, session.selected_item_index, candidate)
+            added_names.append(candidate)
+
+        self.clear_mux_prompt(chat_id, owner_user_id)
+        names_preview = '、'.join(added_names[:3])
+        if len(added_names) > 3:
+            names_preview += f' 等 {len(added_names)} 个'
+        return f'✅ <b>已批量添加字幕</b> <code>{html.escape(names_preview)}</code>'
+
+    def pick_mux_add_sub_candidate(self, chat_id: int, owner_user_id: int, candidate_index: int) -> str:
+        session = self.get_mux_session(chat_id, owner_user_id)
+        if not session:
+            raise AssPipelineError('当前没有进行中的字幕内封会话，请重新发送 /ass')
+        if session.awaiting_field != 'add_sub_pick':
+            raise AssPipelineError('当前不在按钮选字幕状态，请重新进入单集编辑')
+        if session.selected_item_index is None:
+            raise AssPipelineError('当前没有选中要添加字幕的视频项')
+        try:
+            candidate = session.add_sub_candidates[candidate_index]
+        except IndexError as exc:
+            raise AssPipelineError('选中的字幕候选不存在，请重新打开候选列表') from exc
+        result = self.add_mux_subtitle_to_item(chat_id, owner_user_id, session.selected_item_index, candidate)
+        self.clear_mux_prompt(chat_id, owner_user_id)
+        return result
+
+    def add_mux_subtitle_to_item(self, chat_id: int, owner_user_id: int, item_index: int, filename: str) -> str:
+        session = self.get_mux_session(chat_id, owner_user_id)
+        if not session or not session.plan:
+            raise AssPipelineError('当前还没有生成计划')
+        item = session.plan.items[item_index]
+        candidate_name = Path(filename.strip()).name
+        if not candidate_name:
+            raise AssPipelineError('字幕文件名不能为空')
+        if candidate_name != filename.strip():
+            raise AssPipelineError('请只输入同目录字幕文件名，不要带路径')
+
+        item_rel_dir = Path(item.mkv).parent
+        rel_path = item_rel_dir / candidate_name
+        full_path = (session.settings.target_dir.expanduser().resolve() / rel_path).resolve()
+        target_root = session.settings.target_dir.expanduser().resolve()
+        try:
+            full_path.relative_to(target_root)
+        except ValueError as exc:
+            raise AssPipelineError('字幕文件超出工作目录范围') from exc
+        if not full_path.is_file():
+            raise AssPipelineError(f'字幕文件不存在: {rel_path}')
+        if full_path.suffix.lower() not in ('.ass', '.sup'):
+            raise AssPipelineError('只支持 .ass 或 .sup 字幕文件')
+        if any(Path(sub.file).name == candidate_name for sub in item.subs):
+            raise AssPipelineError('该字幕文件已在当前视频计划中')
+
+        detected_lang_raw = infer_lang_raw_from_subtitle_name(candidate_name, session.default_lang)
+        detected_mkv_lang, detected_track_name = build_track_name(session.default_group, detected_lang_raw)
+        item.subs.append(
+            SubtitleTrackPlan(
+                file=str(rel_path),
+                group=session.default_group,
+                lang_raw=detected_lang_raw,
+                mkv_lang=detected_mkv_lang,
+                track_name=detected_track_name,
+            )
+        )
+        recount_mux_plan(session.plan)
+        session.touch()
+        return f'✅ <b>已添加字幕</b> <code>{candidate_name}</code>'
+
+    def remove_mux_subtitle_from_item(self, chat_id: int, owner_user_id: int, item_index: int, sub_index: int) -> str:
+        session = self.get_mux_session(chat_id, owner_user_id)
+        if not session or not session.plan:
+            raise AssPipelineError('当前还没有生成计划')
+        item = session.plan.items[item_index]
+        try:
+            removed = item.subs.pop(sub_index)
+        except IndexError as exc:
+            raise AssPipelineError('选中的字幕项不存在，请重新进入该单集') from exc
+        recount_mux_plan(session.plan)
+        session.touch()
+        return f'🗑️ <b>已移除字幕</b> <code>{Path(removed.file).name}</code>'
+
     def set_mux_prompt(self, chat_id: int, owner_user_id: int, *, field: str, item_index: int | None = None, sub_index: int | None = None, message_id: int | None = None) -> None:
         session = self.get_mux_session(chat_id, owner_user_id)
         if not session:
@@ -381,6 +555,10 @@ class AssService:
         session.selected_sub_index = sub_index
         session.awaiting_field = field
         session.awaiting_message_id = message_id
+        if field != 'add_sub_pick':
+            session.add_sub_candidates = []
+            session.add_sub_selected_indexes = set()
+            session.add_sub_page = 0
         session.touch()
 
     def clear_mux_prompt(self, chat_id: int, owner_user_id: int) -> None:
@@ -391,6 +569,9 @@ class AssService:
         session.selected_sub_index = None
         session.awaiting_field = None
         session.awaiting_message_id = session.awaiting_message_id
+        session.add_sub_candidates = []
+        session.add_sub_selected_indexes = set()
+        session.add_sub_page = 0
         session.touch()
 
     def _parse_lang_or_raise(self, raw: str) -> tuple[str, str]:
@@ -447,6 +628,13 @@ class AssService:
             self.clear_mux_prompt(chat_id, owner_user_id)
             session.touch()
             return format_jobs_updated(session.settings.jobs)
+
+        if field == 'add_sub_file':
+            if session.selected_item_index is None:
+                raise AssPipelineError('当前没有选中要添加字幕的视频项')
+            result = self.add_mux_subtitle_to_item(chat_id, owner_user_id, session.selected_item_index, raw)
+            self.clear_mux_prompt(chat_id, owner_user_id)
+            return result
 
         item, sub = self._resolve_track(session)
 

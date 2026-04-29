@@ -446,6 +446,9 @@ def process_one_item(
         tmp_path=tmp_path,
         settings=settings,
     )
+    if rc == 1:
+        _log(prefix, f"⚠️ mkvmerge 以 warning 退出（exit=1），继续后续替换: {mkv_path.name}", level=logging.WARNING)
+        rc = 0
     if rc not in (0, 99):
         if rc == 124:
             msg = f"{mkv_path.name}: idle timeout"
