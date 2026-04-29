@@ -14,6 +14,7 @@ services:
       - ./.env:/app/.env:ro
       - ./data:/app/data
       - ${ASS_TARGET_HOST_DIR:-./data/ass_target}:${ASS_TARGET_DIR:-/ass_target}
+      - ${ASS_MUX_TARGET_HOST_DIR:-./data/ass_mux_target}:${ASS_MUX_TARGET_DIR:-/ass_mux_target}
     shm_size: '2gb'
     logging:
       driver: "json-file"

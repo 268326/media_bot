@@ -3,9 +3,9 @@ FROM python:3.11-slim
 # 设置工作目录
 WORKDIR /app
 
-# 安装系统依赖（STRM 监控需要 inotifywait；ASS 内封需要 7z/fontforge/assfonts）
+# 安装系统依赖（STRM 监控需要 inotifywait；ASS 处理需要 7z/fontforge/assfonts；字幕内封需要 mkvmerge）
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl unzip inotify-tools p7zip-full fontforge-nox \
+    && apt-get install -y --no-install-recommends ca-certificates curl unzip inotify-tools p7zip-full fontforge-nox mkvtoolnix \
     && rm -rf /var/lib/apt/lists/*
 
 # 安装指定架构的静态 ffprobe

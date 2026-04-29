@@ -30,7 +30,11 @@ from config import (
     LOG_PATH,
     HDHIVE_PARSE_INCOMING_LINKS,
 )
-from ass_service import ass_service
+from ass_service import (
+    ass_service,
+    ASS_MENU_PREFIX,
+    ASS_MUX_PREFIX,
+)
 from danmu_service import fetch_bilibili_danmaku_xml, DanmuError
 from checkin_service import daily_check_in
 from utils import parse_hdhive_link, detect_share_provider, is_115_share_link, detect_provider_by_website
@@ -658,13 +662,8 @@ async def cmd_ass(message: Message):
     if not await check_user_permission(message):
         return
 
-    wait_msg = await message.reply("⏳ 正在执行 ASS 字幕子集化字体内封，请稍候…", parse_mode="HTML")
-    ok, text = await ass_service.run(message.bot, message.chat.id)
-    prefix = "✅" if ok else "❌"
-    try:
-        await wait_msg.edit_text(text, parse_mode="HTML")
-    except Exception:
-        await message.reply(f"{prefix} ASS 任务已完成，请查看机器人日志/汇总消息", parse_mode="HTML")
+    text, kb = await ass_service.build_mux_menu(message)
+    await message.reply(text, reply_markup=kb, parse_mode="HTML")
 
 
 @router.message(Command("strm_status"))
@@ -1117,7 +1116,239 @@ async def handle_keyword_search(message: Message, keyword: str, search_type: str
         await wait_msg.edit_text(f"❌ 运行出错: {e}", parse_mode="HTML")
 
 
-# ==================== 回调查询处理器 ====================
+
+@router.callback_query(F.data.startswith(ASS_MENU_PREFIX))
+async def callback_ass_menu(callback: CallbackQuery):
+    if not await check_callback_permission(callback):
+        return
+
+    msg = callback.message
+    if not msg:
+        await callback.answer()
+        return
+
+    action = (callback.data or "")[len(ASS_MENU_PREFIX):]
+    if action == "subset":
+        await callback.answer("开始执行子集化字体…")
+        await msg.edit_text("⏳ 正在执行 ASS 字幕子集化字体内封，请稍候…", parse_mode="HTML")
+        ok, text = await ass_service.run_subset(callback.bot, msg.chat.id)
+        prefix = "✅" if ok else "❌"
+        try:
+            await msg.edit_text(text, parse_mode="HTML")
+        except Exception:
+            await msg.answer(f"{prefix} ASS 任务已完成，请查看机器人日志/汇总消息", parse_mode="HTML")
+        return
+
+    if action == "mux_start":
+        await callback.answer("开始创建字幕内封会话…")
+        try:
+            await ass_service.start_mux_session(chat_id=msg.chat.id, owner_user_id=callback.from_user.id)
+            text = await ass_service.build_mux_panel_text(msg.chat.id, callback.from_user.id)
+            kb = ass_service.build_mux_plan_keyboard(msg.chat.id, callback.from_user.id)
+            await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        except Exception as exc:
+            logging.exception("❌ 创建 /ass 字幕内封会话失败")
+            await msg.edit_text(f"❌ 创建字幕内封会话失败\n\n<code>{html.escape(str(exc))}</code>", parse_mode="HTML")
+        return
+
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith(ASS_MUX_PREFIX))
+async def callback_ass_mux(callback: CallbackQuery):
+    if not await check_callback_permission(callback):
+        return
+
+    msg = callback.message
+    if not msg:
+        await callback.answer()
+        return
+
+    if not ass_service.ensure_mux_owner(msg.chat.id, callback.from_user.id):
+        await callback.answer("只能由发起人操作", show_alert=True)
+        return
+
+    payload = (callback.data or "")[len(ASS_MUX_PREFIX):]
+
+    try:
+        if payload == "toggle_delete":
+            session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
+            if not session:
+                raise RuntimeError("当前会话已失效，请重新发送 /ass")
+            session.delete_external_subs = not session.delete_external_subs
+            session.awaiting_message_id = msg.message_id
+            session.touch()
+            await callback.answer("已切换删除外挂字幕开关")
+            text = await ass_service.build_mux_panel_text(msg.chat.id, callback.from_user.id)
+            kb = ass_service.build_mux_plan_keyboard(msg.chat.id, callback.from_user.id)
+            await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            return
+
+        if payload == "toggle_dry":
+            session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
+            if not session:
+                raise RuntimeError("当前会话已失效，请重新发送 /ass")
+            session.dry_run = not session.dry_run
+            session.awaiting_message_id = msg.message_id
+            session.touch()
+            await callback.answer("已切换 DRY-RUN 开关")
+            text = await ass_service.build_mux_panel_text(msg.chat.id, callback.from_user.id)
+            kb = ass_service.build_mux_plan_keyboard(msg.chat.id, callback.from_user.id)
+            await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            return
+
+        if payload == "prompt_group":
+            ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="default_group", message_id=msg.message_id)
+            await callback.answer("请发送默认字幕组")
+            await msg.answer(
+                "✏️ 请输入新的默认字幕组\n\n"
+                "• 直接发送文字 = 设置字幕组\n"
+                "• 发送 <code>-</code> = 清空字幕组\n"
+                "• 修改后请点击“重新扫描生成计划”使其生效",
+                parse_mode="HTML",
+            )
+            return
+
+        if payload == "prompt_lang":
+            ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="default_lang", message_id=msg.message_id)
+            await callback.answer("请发送默认语言")
+            await msg.answer(
+                "🌐 请输入新的默认语言，例如：<code>chs</code> / <code>cht</code> / <code>eng</code> / <code>chs_eng</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        if payload == "refresh":
+            await callback.answer("正在重新扫描生成计划…")
+            await msg.edit_text("🔄 正在扫描目录并生成字幕内封计划…", parse_mode="HTML")
+            session, preview = await ass_service.rebuild_mux_plan(msg.chat.id, callback.from_user.id)
+            session.awaiting_message_id = msg.message_id
+            panel_text = await ass_service.build_mux_panel_text(msg.chat.id, callback.from_user.id)
+            kb = ass_service.build_mux_plan_keyboard(msg.chat.id, callback.from_user.id)
+            await msg.edit_text(panel_text, reply_markup=kb, parse_mode="HTML")
+            return
+
+        if payload.startswith("page:"):
+            _, page_raw = payload.split(":", 1)
+            session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
+            if not session:
+                raise RuntimeError("当前会话已失效，请重新发送 /ass")
+            page = int(page_raw)
+            if page != session.plan_page:
+                session.plan_page = max(0, page)
+                session.awaiting_message_id = msg.message_id
+                session.touch()
+                text = await ass_service.build_mux_panel_text(msg.chat.id, callback.from_user.id)
+                kb = ass_service.build_mux_plan_keyboard(msg.chat.id, callback.from_user.id)
+                await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            await callback.answer()
+            return
+
+        if payload.startswith("edit_item:"):
+            _, index_raw = payload.split(":", 1)
+            item_index = int(index_raw)
+            session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
+            if session:
+                session.awaiting_message_id = msg.message_id
+                session.touch()
+            await callback.answer("打开条目编辑")
+            text = ass_service.format_mux_item_detail(msg.chat.id, callback.from_user.id, item_index)
+            kb = ass_service.build_mux_item_keyboard(msg.chat.id, callback.from_user.id, item_index)
+            await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            return
+
+        if payload.startswith("prompt_subfile:"):
+            _, item_raw, sub_raw = payload.split(":", 2)
+            item_index = int(item_raw)
+            sub_index = int(sub_raw)
+            candidates = ass_service.list_mux_candidate_subs(msg.chat.id, callback.from_user.id, item_index)
+            ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="sub_file", item_index=item_index, sub_index=sub_index, message_id=msg.message_id)
+            await callback.answer("请发送新的字幕文件名")
+            lines = [
+                "🧩 请输入新的字幕文件名（只输入文件名，不要带路径）",
+                "",
+                "<b>同目录可选字幕：</b>",
+            ]
+            if candidates:
+                for name in candidates[:20]:
+                    lines.append(f"• <code>{html.escape(name)}</code>")
+                if len(candidates) > 20:
+                    lines.append(f"• ... 其余 <code>{len(candidates) - 20}</code> 个已省略")
+            else:
+                lines.append("• <code>（未发现 .ass/.sup）</code>")
+            await msg.answer("\n".join(lines), parse_mode="HTML")
+            return
+
+        if payload.startswith("prompt_subgroup:"):
+            _, item_raw, sub_raw = payload.split(":", 2)
+            item_index = int(item_raw)
+            sub_index = int(sub_raw)
+            ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="track_group", item_index=item_index, sub_index=sub_index, message_id=msg.message_id)
+            await callback.answer("请发送字幕组")
+            await msg.answer(
+                "✏️ 请输入新的字幕组\n\n• 直接发送文字 = 设置字幕组\n• 发送 <code>-</code> = 清空字幕组",
+                parse_mode="HTML",
+            )
+            return
+
+        if payload.startswith("prompt_sublang:"):
+            _, item_raw, sub_raw = payload.split(":", 2)
+            item_index = int(item_raw)
+            sub_index = int(sub_raw)
+            ass_service.set_mux_prompt(msg.chat.id, callback.from_user.id, field="track_lang", item_index=item_index, sub_index=sub_index, message_id=msg.message_id)
+            await callback.answer("请发送字幕语言")
+            await msg.answer(
+                "🌐 请输入新的字幕语言，例如：<code>chs</code> / <code>cht</code> / <code>eng</code> / <code>chs_eng</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        if payload == "back_plan":
+            ass_service.clear_mux_prompt(msg.chat.id, callback.from_user.id)
+            session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
+            if session:
+                session.awaiting_message_id = msg.message_id
+                session.touch()
+            await callback.answer("返回计划列表")
+            text = await ass_service.build_mux_panel_text(msg.chat.id, callback.from_user.id)
+            kb = ass_service.build_mux_plan_keyboard(msg.chat.id, callback.from_user.id)
+            await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            return
+
+        if payload == "run_confirm":
+            await callback.answer("请确认是否执行")
+            text = ass_service.format_mux_run_confirm(msg.chat.id, callback.from_user.id)
+            kb = ass_service.build_mux_run_confirm_keyboard()
+            await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            return
+
+        if payload == "run_now":
+            await callback.answer("开始执行字幕内封…")
+            await msg.edit_text("⏳ 正在执行字幕内封，请稍候…\n\n详细过程请查看 Docker 日志。", parse_mode="HTML")
+            ok, text = await ass_service.run_mux(callback.bot, msg.chat.id, callback.from_user.id)
+            prefix = "✅" if ok else "❌"
+            try:
+                await msg.edit_text(text, parse_mode="HTML")
+            except Exception:
+                await msg.answer(f"{prefix} 字幕内封任务已完成，请查看机器人日志/汇总消息", parse_mode="HTML")
+            return
+
+        if payload == "cancel":
+            ass_service.clear_mux_session(msg.chat.id, callback.from_user.id)
+            await callback.answer("已结束本次会话")
+            await msg.edit_text("❎ 已结束本次 /ass 字幕内封会话。", parse_mode="HTML")
+            return
+
+        await callback.answer()
+    except Exception as exc:
+        logging.exception("❌ /ass 字幕内封交互失败")
+        await callback.answer("操作失败", show_alert=True)
+        try:
+            await msg.answer(f"❌ 操作失败\n\n<code>{html.escape(str(exc))}</code>", parse_mode="HTML")
+        except Exception:
+            pass
+
+
 
 @router.callback_query(F.data.startswith("rm_strm_confirm:"))
 async def callback_rm_strm_confirm(callback: CallbackQuery):
@@ -1583,13 +1814,37 @@ async def handle_direct_link(message: Message):
     # 权限检查
     if not await check_user_permission(message):
         return
-    
+
     # 获取文本内容 (text 或 caption)
     text = message.text or message.caption
-    
+
     if not text:
         return
-    
+
+    session = ass_service.get_mux_session(message.chat.id, message.from_user.id)
+    if session and session.awaiting_field and message.from_user.id == session.owner_user_id and message.text and not text.startswith('/'):
+        try:
+            panel_message_id = session.awaiting_message_id
+            result_text = ass_service.apply_mux_text_input(message.chat.id, message.from_user.id, text)
+            await message.reply(result_text, parse_mode="HTML")
+            panel_text = await ass_service.build_mux_panel_text(message.chat.id, message.from_user.id)
+            kb = ass_service.build_mux_plan_keyboard(message.chat.id, message.from_user.id)
+            if panel_message_id:
+                try:
+                    await message.bot.edit_message_text(
+                        chat_id=message.chat.id,
+                        message_id=panel_message_id,
+                        text=panel_text,
+                        reply_markup=kb,
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+        except Exception as exc:
+            logging.exception("❌ 处理 /ass 字幕内封输入失败")
+            await message.reply(f"❌ 输入无效\n\n<code>{html.escape(str(exc))}</code>", parse_mode="HTML")
+        return
+
     # 如果是命令，跳过（由其他handler处理）
     if text.startswith('/'):
         return

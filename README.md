@@ -1,6 +1,6 @@
 # Media Bot
 
-一个基于 `aiogram + HDHive Open API` 的 Telegram Bot，用于 HDHive 资源检索、链接提取、解锁、每日签到、定时自动签到、可选的 `.strm` 文件监控重命名归档，以及手动触发的 ASS 字幕纯 TTF 子集化字体内封。
+一个基于 `aiogram + HDHive Open API` 的 Telegram Bot，用于 HDHive 资源检索、链接提取、解锁、每日签到、定时自动签到、可选的 `.strm` 文件监控重命名归档，以及手动触发的 ASS 字幕处理（子集化字体内封 / MKV 字幕内封）。
 
 ## 功能
 
@@ -14,7 +14,9 @@
 - `CHECKIN_CRON` 定时自动签到
 - 自动签到失败时通知 `ALLOWED_USER_ID`
 - `/danmu` 下载 B 站弹幕 XML
-- `/ass` 手动执行 ASS 字幕纯 TTF 子集化字体内封
+- `/ass` 打开 ASS 菜单：
+  - 子集化字体：ASS 字幕纯 TTF 字体子集化并生成 `*.assfonts.ass`
+  - 内封字幕：把同目录匹配到的 `.ass/.sup` 内封到 `.mkv`
 - `/strm_status` 查看 STRM 监控服务状态
 - `/strm_scan` 手动触发一次 STRM 存量重扫
 - `/strm_restart` 手动重启 STRM watcher
@@ -45,13 +47,39 @@
 - `SA_ENABLE_115_PUSH`
 - `MEDIA_BOT_DEBUG`：是否输出调试日志（true/false）
 - `MEDIA_BOT_LOG_TO_FILE`：是否同时写本地日志文件；默认 `0`，仅输出到 Docker 日志
-- `TGBOT_NOTIFY_CHAT_ID`：STRM 归档通知接收目标（用户/群组/频道 Chat ID）
+- `TGBOT_NOTIFY_CHAT_ID`：STRM / ASS 汇总通知接收目标（用户/群组/频道 Chat ID）
+
+### /ass 子集化字体相关
+
 - `ASS_TARGET_HOST_DIR`：宿主机字幕目录，供 Docker 挂载
-- `ASS_TARGET_DIR`：容器内 ASS 处理目录，`/ass` 命令从这里读取字幕/字体/压缩包
-- `ASS_NOTIFY_CHAT_ID`：`/ass` 汇总通知目标；留空时回退 `TGBOT_NOTIFY_CHAT_ID`，再回退 `ALLOWED_USER_ID`
-- `ASS_RECURSIVE`：`/ass` 是否递归扫描子目录
-- `ASS_INCLUDE_SYSTEM_FONTS`：`/ass` 是否把系统字体纳入纯 TTF 字体池
-- `ASS_WORK_DIR`：`/ass` 临时工作目录（默认 `<ASS_TARGET_DIR>/.assfonts_pipeline_work`）
+- `ASS_TARGET_DIR`：容器内 ASS 处理目录，`/ass -> 子集化字体` 从这里读取字幕/字体/压缩包
+- `ASS_NOTIFY_CHAT_ID`：`/ass` 子集化字体汇总通知目标；留空时回退 `TGBOT_NOTIFY_CHAT_ID`，再回退 `ALLOWED_USER_ID`
+- `ASS_RECURSIVE`：是否递归扫描子目录
+- `ASS_INCLUDE_SYSTEM_FONTS`：是否把系统字体纳入纯 TTF 字体池
+- `ASS_WORK_DIR`：临时工作目录（默认 `<ASS_TARGET_DIR>/.assfonts_pipeline_work`）
+
+### /ass 字幕内封相关
+
+- `ASS_MUX_TARGET_HOST_DIR`：宿主机视频/字幕目录，供 Docker 挂载
+- `ASS_MUX_TARGET_DIR`：容器内字幕内封目录，`/ass -> 内封字幕` 从这里扫描 `.mkv` 与同目录 `.ass/.sup`
+- `ASS_MUX_NOTIFY_CHAT_ID`：`/ass` 字幕内封汇总通知目标；留空时回退 `TGBOT_NOTIFY_CHAT_ID`，再回退 `ALLOWED_USER_ID`
+- `ASS_MUX_RECURSIVE`：是否递归扫描子目录
+- `ASS_MUX_DEFAULT_LANG`：默认字幕语言（如 `chs` / `cht` / `eng` / `chs_eng`）
+- `ASS_MUX_DEFAULT_GROUP`：默认字幕组
+- `ASS_MUX_JOBS`：并发执行 `mkvmerge` 的线程数
+- `ASS_MUX_DELETE_EXTERNAL_SUBS`：是否默认在内封成功后删除外挂字幕
+- `ASS_MUX_ALLOW_CROSS_FS`：是否允许临时目录与 MKV 跨文件系统
+- `ASS_MUX_TMP_DIR`：临时目录（默认 `<ASS_MUX_TARGET_DIR>/.ass_mux_tmp`）
+- `ASS_MUX_IDLE_TIMEOUT_SECONDS`：标准模式空闲超时秒数，默认 `1800`（30 分钟）
+- `ASS_MUX_SOFT_WARN_AFTER_SECONDS`：标准模式总耗时软告警阈值，默认 `7200`（2 小时）
+- `ASS_MUX_HARD_CAP_SECONDS`：标准模式极限保险阈值，默认 `43200`（12 小时）
+- `ASS_MUX_PROGRESS_POLL_INTERVAL_SECONDS`：进度轮询间隔，默认 `5`
+- `ASS_MUX_TERMINATE_GRACE_SECONDS`：先 `terminate` 后等待再 `kill` 的宽限秒数，默认 `15`
+- `ASS_MUX_PLAN_PATH`：计划文件保存位置（默认 `<ASS_MUX_TARGET_DIR>/.ass_mux_plan.json`）
+- `ASS_MKVMERGE_BIN`：`mkvmerge` 可执行文件路径，默认 `mkvmerge`
+
+### 其他常用配置
+
 - `STRM_WATCH_ENABLED`：是否启用 STRM 监控
 - `STRM_WATCH_DIR` / `STRM_DONE_DIR` / `STRM_FAILED_DIR`
 - `STRM_FFPROBE_PATH`：默认 `/usr/local/bin/ffprobe`
@@ -71,18 +99,20 @@
 - `/points`、`/checkin` 和自动签到依赖 HDHive Premium 权限对应的 Open API
 - `MEDIA_BOT_DEBUG=true` 时会输出 DEBUG 日志，便于排查问题
 - `MEDIA_BOT_LOG_TO_FILE=0` 时，日志仅输出到 stdout/stderr，可直接用 `docker compose logs -f media_bot` 查看
-- `TGBOT_NOTIFY_CHAT_ID` 配置后，STRM 在归档根目录文件或完成目录批次归档时会发送 Telegram 汇总通知
-- `/ass` 不写独立本地日志文件，运行详情直接进入 Docker 日志，并通过 Telegram 返回汇总消息
-- `/ass` 在真正内嵌前会先把字体池中的 OTF 转成 TTF，并复制原字体 name table，后续只用纯 TTF/TTC 做匹配与内嵌
+- `TGBOT_NOTIFY_CHAT_ID` 配置后，STRM 和 `/ass` 可发送 Telegram 汇总通知
+- `/ass` 不写独立本地日志文件，运行详情直接进入 Docker 日志
+- `/ass -> 子集化字体` 在真正内嵌前会先把字体池中的 OTF 转成 TTF，并复制原字体 name table，后续只用纯 TTF/TTC 做匹配与内嵌
+- `/ass -> 内封字幕` 使用 `mkvmerge` 写回原 MKV；支持在 Telegram 中逐项修改默认字幕组、语言、字幕文件名，并可切换 DRY-RUN / 删除外挂字幕
+- `/ass -> 内封字幕` 现已内置标准模式超时保护：空闲超时 30 分钟、总时长 2 小时仅告警、12 小时极限保险，不提供 TG 选择按钮
+- `/ass -> 内封字幕` 已支持 Telegram 中按页翻页预览计划细节，并在执行确认前显示磁盘空间、源视频总大小、平均/最大单集大小、预计临时占用、是否同分区等信息
 - `/rm_strm` 默认只预览；需在 Bot 返回消息下点击“确认删除”按钮才会实际删除
 - STRM 监控依赖系统中的 `ffprobe` 和 `inotifywait`，Dockerfile 已自动安装
 
-## Docker 运行（默认远程镜像）
+## Docker 运行
 
 ```bash
 cd /path/to/media_bot
-docker compose pull
-docker compose up -d
+docker compose up -d --build
 ```
 
 查看日志：
@@ -93,32 +123,49 @@ docker compose logs -f media_bot
 
 ### /ass 使用前准备
 
-1. 在 `.env` 中设置：
+1. 在 `.env` 中至少设置：
 
 ```env
 MEDIA_BOT_LOG_TO_FILE=0
-ASS_TARGET_HOST_DIR=/你的宿主机字幕目录
+
+# 子集化字体
+ASS_TARGET_HOST_DIR=/你的字幕目录
 ASS_TARGET_DIR=/ass_target
-ASS_NOTIFY_CHAT_ID=
+
+# 字幕内封
+ASS_MUX_TARGET_HOST_DIR=/你的视频与字幕目录
+ASS_MUX_TARGET_DIR=/ass_mux_target
+ASS_MUX_DEFAULT_LANG=chs
+ASS_MUX_DEFAULT_GROUP=
+ASS_MUX_JOBS=2
 ```
 
 2. `docker-compose.yml` 已默认挂载：
 
 ```yaml
 - ${ASS_TARGET_HOST_DIR:-./data/ass_target}:${ASS_TARGET_DIR:-/ass_target}
+- ${ASS_MUX_TARGET_HOST_DIR:-./data/ass_mux_target}:${ASS_MUX_TARGET_DIR:-/ass_mux_target}
 ```
 
-3. 在 Telegram 中手动发送：
+3. 在 Telegram 中发送：
 
 ```text
 /ass
 ```
 
-Bot 会：
+4. Bot 会弹出菜单：
 
-- 扫描 `ASS_TARGET_DIR`
-- 自动解压 `7z/zip` 字体包
-- 把 OTF 前置转成 TTF
-- 跳过已存在的 `*.assfonts.ass`
-- 在 Docker 日志输出详细过程
-- 最后在 Telegram 返回汇总信息
+- `🔤 子集化字体`
+  - 扫描 `ASS_TARGET_DIR`
+  - 自动解压 `7z/zip` 字体包
+  - 把 OTF 前置转成 TTF
+  - 跳过已存在的 `*.assfonts.ass`
+  - 在 Docker 日志输出详细过程
+  - 最后在 Telegram 返回汇总信息
+- `🎞️ 内封字幕`
+  - 扫描 `ASS_MUX_TARGET_DIR` 下的 `.mkv` 与同目录 `.ass/.sup`
+  - 自动生成计划并在 Telegram 中显示预览
+  - 需要时可逐项修改字幕文件、字幕组、语言
+  - 可切换 `DRY-RUN` 与“删除外挂字幕”
+  - 确认后调用 `mkvmerge` 并在 Docker 日志输出逐集过程
+  - 完成后向 Telegram 返回汇总通知

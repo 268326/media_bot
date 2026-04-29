@@ -36,6 +36,12 @@ def run_ass_pipeline(settings: AssSettings) -> AssRunSummary:
         raise AssPipelineError(f'ASS_TARGET_DIR 不存在: {target_dir}')
 
     work_dir = settings.work_dir.expanduser().resolve()
+    try:
+        target_dir.relative_to(work_dir)
+        raise AssPipelineError(f'ASS_WORK_DIR 不能等于或位于 ASS_TARGET_DIR 的上层目录: work={work_dir} target={target_dir}')
+    except ValueError:
+        pass
+
     reset_dir(work_dir)
     scan = scan_root(target_dir, settings.recursive, exclude_dirs=[work_dir])
     if not scan.ass_files:
