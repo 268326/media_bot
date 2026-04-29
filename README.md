@@ -1,6 +1,6 @@
 # Media Bot
 
-一个基于 `aiogram + HDHive Open API` 的 Telegram Bot，用于 HDHive 资源检索、链接提取、解锁、每日签到、定时自动签到，以及可选的 `.strm` 文件监控重命名归档。
+一个基于 `aiogram + HDHive Open API` 的 Telegram Bot，用于 HDHive 资源检索、链接提取、解锁、每日签到、定时自动签到、可选的 `.strm` 文件监控重命名归档，以及手动触发的 ASS 字幕纯 TTF 子集化字体内封。
 
 ## 功能
 
@@ -14,6 +14,7 @@
 - `CHECKIN_CRON` 定时自动签到
 - 自动签到失败时通知 `ALLOWED_USER_ID`
 - `/danmu` 下载 B 站弹幕 XML
+- `/ass` 手动执行 ASS 字幕纯 TTF 子集化字体内封
 - `/strm_status` 查看 STRM 监控服务状态
 - `/strm_scan` 手动触发一次 STRM 存量重扫
 - `/strm_restart` 手动重启 STRM watcher
@@ -43,7 +44,14 @@
 - `SA_TOKEN`
 - `SA_ENABLE_115_PUSH`
 - `MEDIA_BOT_DEBUG`：是否输出调试日志（true/false）
+- `MEDIA_BOT_LOG_TO_FILE`：是否同时写本地日志文件；默认 `0`，仅输出到 Docker 日志
 - `TGBOT_NOTIFY_CHAT_ID`：STRM 归档通知接收目标（用户/群组/频道 Chat ID）
+- `ASS_TARGET_HOST_DIR`：宿主机字幕目录，供 Docker 挂载
+- `ASS_TARGET_DIR`：容器内 ASS 处理目录，`/ass` 命令从这里读取字幕/字体/压缩包
+- `ASS_NOTIFY_CHAT_ID`：`/ass` 汇总通知目标；留空时回退 `TGBOT_NOTIFY_CHAT_ID`，再回退 `ALLOWED_USER_ID`
+- `ASS_RECURSIVE`：`/ass` 是否递归扫描子目录
+- `ASS_INCLUDE_SYSTEM_FONTS`：`/ass` 是否把系统字体纳入纯 TTF 字体池
+- `ASS_WORK_DIR`：`/ass` 临时工作目录（默认 `<ASS_TARGET_DIR>/.assfonts_pipeline_work`）
 - `STRM_WATCH_ENABLED`：是否启用 STRM 监控
 - `STRM_WATCH_DIR` / `STRM_DONE_DIR` / `STRM_FAILED_DIR`
 - `STRM_FFPROBE_PATH`：默认 `/usr/local/bin/ffprobe`
@@ -62,48 +70,12 @@
 - 关键词搜索依赖 TMDB API，因此 `/hdt` 和 `/hdm` 建议同时配置 `TMDB_API_KEY`
 - `/points`、`/checkin` 和自动签到依赖 HDHive Premium 权限对应的 Open API
 - `MEDIA_BOT_DEBUG=true` 时会输出 DEBUG 日志，便于排查问题
+- `MEDIA_BOT_LOG_TO_FILE=0` 时，日志仅输出到 stdout/stderr，可直接用 `docker compose logs -f media_bot` 查看
 - `TGBOT_NOTIFY_CHAT_ID` 配置后，STRM 在归档根目录文件或完成目录批次归档时会发送 Telegram 汇总通知
+- `/ass` 不写独立本地日志文件，运行详情直接进入 Docker 日志，并通过 Telegram 返回汇总消息
+- `/ass` 在真正内嵌前会先把字体池中的 OTF 转成 TTF，并复制原字体 name table，后续只用纯 TTF/TTC 做匹配与内嵌
 - `/rm_strm` 默认只预览；需在 Bot 返回消息下点击“确认删除”按钮才会实际删除
 - STRM 监控依赖系统中的 `ffprobe` 和 `inotifywait`，Dockerfile 已自动安装
-
-## STRM 监控说明
-
-启用后，后台会递归监控 `STRM_WATCH_DIR` 下的 `.strm` 文件：
-
-- 监听 `close_write/moved_to`
-- 首次扫描或增量事件到达时，为每个一级目录生成并更新一份 manifest 批次计划
-- 读取 `.strm` 内 URL
-- 用 `ffprobe` 探测媒体信息
-- 清理旧技术标签并重命名
-- 每完成一个 `.strm`，立即把对应 manifest 条目标记为 `done / already_ok / failed`
-- 失败文件移动到 `STRM_FAILED_DIR`（保留原目录层级）
-- 一级目录空闲且达到最小存活时间后，会先重新扫描目录并与 manifest 对账：
-  - 若发现新增 `.strm`，会加入计划并继续处理
-  - 若计划里仍有 `pending / processing / missing`，不会归档
-  - 仅当计划闭环后，才整体移动到 `STRM_DONE_DIR`
-- 当 `STRM_ONLY_FIRST_LEVEL_DIR=0` 时，根目录下直放的 `.strm` 成功后也会直接移动到 `STRM_DONE_DIR`
-
-已内置以下稳健性优化：
-
-- `/rm_strm` 采用 Telegram 按钮二次确认，避免误删
-- 同一路径去重，避免重复提交
-- manifest 持久化到 `STRM_STATE_DIR`，支持容器重启后恢复批次状态
-- `processing` 条目带租约时间，异常退出后会自动回退到 `pending`
-- 已完成/失败的 manifest 会按 `STRM_STATE_RETENTION_HOURS` 自动清理，避免状态目录长期膨胀
-- 批量导入推荐参数：`STRM_IDLE_SECONDS=120`、`STRM_MIN_FOLDER_AGE_SECONDS=300`、`STRM_ONLY_FIRST_LEVEL_DIR=1`
-- 失败移动保留 `.strm` 扩展名
-- `inotifywait` 异常退出自动重启
-- 目录完成判定不再依赖最终全量 `ffprobe` 复查，而是依赖 manifest 闭环 + 目录重扫对账
-- 默认以一级子目录为批次移动到 DONE；当 `STRM_ONLY_FIRST_LEVEL_DIR=0` 时，根目录下直放的 `.strm` 也会被处理，但不会参与整目录移动
-
-## 本地运行（Python）
-
-```bash
-cd /path/to/media_bot
-cp .env.example .env
-pip install -r requirements.txt
-python main.py
-```
 
 ## Docker 运行（默认远程镜像）
 
@@ -119,39 +91,34 @@ docker compose up -d
 docker compose logs -f media_bot
 ```
 
-## GitHub Actions 多架构镜像构建
+### /ass 使用前准备
 
-仓库包含工作流：`.github/workflows/docker-image.yml`
-
-- 触发：push 到 `main/master`、tag `v*`、手动触发
-- 构建平台：`linux/amd64` + `linux/arm64`
-- 推送仓库：`ghcr.io/${{ github.repository }}`
-
-### 使用步骤
-
-1. 将本项目推到 GitHub
-2. 在仓库 `Settings -> Actions -> General` 确保 workflow 权限允许写入 packages
-3. push 到默认分支后，Actions 会自动构建并推送：
-   - `latest`（默认分支）
-   - 分支/tag/sha 标签
-
-## 定时签到示例
-
-每天 08:30 自动签到：
+1. 在 `.env` 中设置：
 
 ```env
-CHECKIN_CRON=30 8 * * *
-CHECKIN_TIMEZONE=Asia/Shanghai
+MEDIA_BOT_LOG_TO_FILE=0
+ASS_TARGET_HOST_DIR=/你的宿主机字幕目录
+ASS_TARGET_DIR=/ass_target
+ASS_NOTIFY_CHAT_ID=
 ```
 
-签到失败会自动通知 `ALLOWED_USER_ID`。
+2. `docker-compose.yml` 已默认挂载：
 
-## Docker 本地构建调试（可选）
-
-如需本地联调，编辑 `docker-compose.yml`：
-- 注释 `image: ghcr.io/268326/media_bot:latest`
-- 取消注释 `build: .`
-
-```bash
-docker compose up -d --build
+```yaml
+- ${ASS_TARGET_HOST_DIR:-./data/ass_target}:${ASS_TARGET_DIR:-/ass_target}
 ```
+
+3. 在 Telegram 中手动发送：
+
+```text
+/ass
+```
+
+Bot 会：
+
+- 扫描 `ASS_TARGET_DIR`
+- 自动解压 `7z/zip` 字体包
+- 把 OTF 前置转成 TTF
+- 跳过已存在的 `*.assfonts.ass`
+- 在 Docker 日志输出详细过程
+- 最后在 Telegram 返回汇总信息

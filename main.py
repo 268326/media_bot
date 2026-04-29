@@ -14,12 +14,18 @@ DOTENV_PATH = os.getenv("MEDIA_BOT_DOTENV_PATH", "/app/.env")
 load_dotenv(dotenv_path=DOTENV_PATH, override=True)
 
 LOG_PATH = os.getenv("MEDIA_BOT_LOG_PATH", os.getenv("HDHIVE_LOG_PATH", "media_bot.log"))
+LOG_TO_FILE = os.getenv("MEDIA_BOT_LOG_TO_FILE", "0").strip().lower() in ("1", "true", "yes", "on")
 MEDIA_BOT_DEBUG = os.getenv("MEDIA_BOT_DEBUG", "false").strip().lower() in ("1", "true", "yes", "on")
 LOG_LEVEL = logging.DEBUG if MEDIA_BOT_DEBUG else logging.INFO
 
-log_dir = os.path.dirname(LOG_PATH)
-if log_dir:
-    os.makedirs(log_dir, exist_ok=True)
+if LOG_TO_FILE:
+    log_dir = os.path.dirname(LOG_PATH)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+
+handlers = [logging.StreamHandler()]
+if LOG_TO_FILE and LOG_PATH:
+    handlers.insert(0, logging.FileHandler(LOG_PATH, encoding="utf-8"))
 
 # ==================== 首先配置日志 ====================
 # 必须在导入其他模块之前配置，因为其他模块可能会使用 logging
@@ -27,10 +33,7 @@ logging.basicConfig(
     level=LOG_LEVEL,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
-    handlers=[
-        logging.FileHandler(LOG_PATH, encoding="utf-8"),
-        logging.StreamHandler()
-    ]
+    handlers=handlers,
 )
 
 # 应用 nest_asyncio（支持嵌套事件循环）
@@ -55,7 +58,7 @@ from hdhive_unlock_service import hdhive_unlock_service
 async def main():
     """主程序"""
     logging.info("🚀 Media Bot 启动中...")
-    logging.info("🧩 配置来源: dotenv=%s, HDHIVE_API_KEY=%s", DOTENV_PATH, mask_secret(HDHIVE_API_KEY))
+    logging.info("🧩 配置来源: dotenv=%s, HDHIVE_API_KEY=%s, log_to_file=%s", DOTENV_PATH, mask_secret(HDHIVE_API_KEY), LOG_TO_FILE)
     
     # 启动时清除所有调试图片
     debug_files = glob.glob("debug_*.png") + glob.glob("error_*.png")

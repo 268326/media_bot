@@ -13,6 +13,7 @@ services:
     volumes:
       - ./.env:/app/.env:ro
       - ./data:/app/data
+      - ${ASS_TARGET_HOST_DIR:-./data/ass_target}:${ASS_TARGET_DIR:-/ass_target}
     shm_size: '2gb'
     logging:
       driver: "json-file"

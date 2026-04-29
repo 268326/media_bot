@@ -30,6 +30,7 @@ from config import (
     LOG_PATH,
     HDHIVE_PARSE_INCOMING_LINKS,
 )
+from ass_service import ass_service
 from danmu_service import fetch_bilibili_danmaku_xml, DanmuError
 from checkin_service import daily_check_in
 from utils import parse_hdhive_link, detect_share_provider, is_115_share_link, detect_provider_by_website
@@ -650,6 +651,20 @@ async def cmd_danmu(message: Message):
     await message.reply_document(file, caption=caption, parse_mode="HTML")
     await wait_msg.delete()
     logging.info("✅ /danmu 完成: user=%s filename=%s cid=%s", message.from_user.id, filename, result.cid)
+
+
+@router.message(Command("ass"))
+async def cmd_ass(message: Message):
+    if not await check_user_permission(message):
+        return
+
+    wait_msg = await message.reply("⏳ 正在执行 ASS 字幕子集化字体内封，请稍候…", parse_mode="HTML")
+    ok, text = await ass_service.run(message.bot, message.chat.id)
+    prefix = "✅" if ok else "❌"
+    try:
+        await wait_msg.edit_text(text, parse_mode="HTML")
+    except Exception:
+        await message.reply(f"{prefix} ASS 任务已完成，请查看机器人日志/汇总消息", parse_mode="HTML")
 
 
 @router.message(Command("strm_status"))
