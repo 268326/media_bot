@@ -616,6 +616,23 @@ def run_mux_plan(
         raise AssPipelineError(f"未找到 mkvmerge: {settings.mkvmerge_bin}")
 
     normalized = _normalize_plan(plan)
+    if not normalized.items:
+        raise AssPipelineError("计划中没有可执行项")
+
+    executable_items = [item for item in normalized.items if item.subs]
+    if not executable_items:
+        raise AssPipelineError("计划中没有选择任何字幕文件，请先为至少一个视频添加字幕")
+
+    normalized = MuxPlan(
+        generated_at=normalized.generated_at,
+        target_dir=normalized.target_dir,
+        defaults=normalized.defaults,
+        items=executable_items,
+        total_mkvs=normalized.total_mkvs,
+        matched_mkvs=len(executable_items),
+        total_sub_tracks=sum(len(item.subs) for item in executable_items),
+    )
+
     target_dir = settings.target_dir.expanduser().resolve()
     if not target_dir.is_dir():
         raise AssPipelineError(f"ASS_MUX_TARGET_DIR 不存在: {target_dir}")

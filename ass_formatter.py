@@ -304,7 +304,7 @@ def format_mux_add_sub_picker(item: Any, item_index: int, candidates: list[str],
         f'🎬 MKV: <code>{html.escape(item.mkv)}</code>',
     ]
     if not candidates:
-        lines.extend(['', '<blockquote>当前目录下没有可添加的候选字幕，或已全部添加。</blockquote>'])
+        lines.extend(['', '<blockquote>当前目录树里没有可添加的候选字幕，或已全部添加。</blockquote>'])
         return join_lines_for_tg(lines)
     start = current_page * page_size
     page_items = candidates[start:start + page_size]

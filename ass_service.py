@@ -397,8 +397,16 @@ class AssService:
         session = self.get_mux_session(chat_id, owner_user_id)
         if not session or not session.plan:
             raise AssPipelineError('当前还没有生成计划')
+        target_root = session.settings.target_dir.expanduser().resolve()
         item = session.plan.items[item_index]
-        item_dir = (session.settings.target_dir.expanduser().resolve() / Path(item.mkv).parent).resolve()
+        if session.mode == 'manual':
+            candidates = [
+                str(path.relative_to(target_root))
+                for path in sorted(target_root.rglob('*'))
+                if path.is_file() and path.suffix.lower() in ('.ass', '.sup')
+            ]
+            return candidates
+        item_dir = (target_root / Path(item.mkv).parent).resolve()
         if not item_dir.is_dir():
             return []
         candidates: list[str] = []
@@ -412,8 +420,8 @@ class AssService:
         if not session or not session.plan:
             raise AssPipelineError('当前还没有生成计划')
         item = session.plan.items[item_index]
-        current_files = {Path(sub.file).name for sub in item.subs}
-        return [name for name in self.list_mux_candidate_subs(chat_id, owner_user_id, item_index) if name not in current_files]
+        current_files = {str(Path(sub.file)) for sub in item.subs}
+        return [name for name in self.list_mux_candidate_subs(chat_id, owner_user_id, item_index) if str(Path(name)) not in current_files]
 
     def prepare_mux_add_sub_picker(self, chat_id: int, owner_user_id: int, item_index: int) -> list[str]:
         session = self.get_mux_session(chat_id, owner_user_id)
@@ -498,32 +506,42 @@ class AssService:
         if not session or not session.plan:
             raise AssPipelineError('当前还没有生成计划')
         item = session.plan.items[item_index]
-        candidate_name = Path(filename.strip()).name
-        if not candidate_name:
-            raise AssPipelineError('字幕文件名不能为空')
-        if candidate_name != filename.strip():
-            raise AssPipelineError('请只输入同目录字幕文件名，不要带路径')
-
-        item_rel_dir = Path(item.mkv).parent
-        rel_path = item_rel_dir / candidate_name
-        full_path = (session.settings.target_dir.expanduser().resolve() / rel_path).resolve()
+        raw_name = filename.strip()
+        candidate_rel: Path | None = None
         target_root = session.settings.target_dir.expanduser().resolve()
-        try:
-            full_path.relative_to(target_root)
-        except ValueError as exc:
-            raise AssPipelineError('字幕文件超出工作目录范围') from exc
+
+        if session.mode == 'manual':
+            try:
+                candidate_rel = Path(raw_name)
+                full_path = (target_root / candidate_rel).resolve()
+                full_path.relative_to(target_root)
+            except ValueError as exc:
+                raise AssPipelineError('字幕文件超出工作目录范围') from exc
+        else:
+            candidate_name = Path(raw_name).name
+            if not candidate_name:
+                raise AssPipelineError('字幕文件名不能为空')
+            if candidate_name != raw_name:
+                raise AssPipelineError('请只输入同目录字幕文件名，不要带路径')
+            candidate_rel = Path(item.mkv).parent / candidate_name
+            full_path = (target_root / candidate_rel).resolve()
+            try:
+                full_path.relative_to(target_root)
+            except ValueError as exc:
+                raise AssPipelineError('字幕文件超出工作目录范围') from exc
+
         if not full_path.is_file():
-            raise AssPipelineError(f'字幕文件不存在: {rel_path}')
+            raise AssPipelineError(f'字幕文件不存在: {candidate_rel}')
         if full_path.suffix.lower() not in ('.ass', '.sup'):
             raise AssPipelineError('只支持 .ass 或 .sup 字幕文件')
-        if any(Path(sub.file).name == candidate_name for sub in item.subs):
+        if any(str(Path(sub.file)) == str(candidate_rel) for sub in item.subs):
             raise AssPipelineError('该字幕文件已在当前视频计划中')
 
-        detected_lang_raw = infer_lang_raw_from_subtitle_name(candidate_name, session.default_lang)
+        detected_lang_raw = infer_lang_raw_from_subtitle_name(full_path.name, session.default_lang)
         detected_mkv_lang, detected_track_name = build_track_name(session.default_group, detected_lang_raw)
         item.subs.append(
             SubtitleTrackPlan(
-                file=str(rel_path),
+                file=str(candidate_rel),
                 group=session.default_group,
                 lang_raw=detected_lang_raw,
                 mkv_lang=detected_mkv_lang,
@@ -532,7 +550,7 @@ class AssService:
         )
         recount_mux_plan(session.plan)
         session.touch()
-        return f'✅ <b>已添加字幕</b> <code>{candidate_name}</code>'
+        return f'✅ <b>已添加字幕</b> <code>{html.escape(str(candidate_rel))}</code>'
 
     def remove_mux_subtitle_from_item(self, chat_id: int, owner_user_id: int, item_index: int, sub_index: int) -> str:
         session = self.get_mux_session(chat_id, owner_user_id)

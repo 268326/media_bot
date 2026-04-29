@@ -323,13 +323,9 @@ def build_manual_mux_plan(settings: AssMuxSettings, *, default_group: str | None
     group = settings.default_group if default_group is None else default_group.strip()
     lang_raw = settings.default_lang if default_lang is None else (default_lang.strip() or settings.default_lang)
 
-    mkvs = _iter_files(target_dir, settings.recursive, (".mkv",))
+    mkvs = sorted(path for path in target_dir.rglob("*") if path.is_file() and path.suffix.lower() == ".mkv")
     if not mkvs:
         raise AssPipelineError(f"目录中未找到 MKV: {target_dir}")
-
-    sub_files = _iter_files(target_dir, settings.recursive, (".ass", ".sup"))
-    if not sub_files:
-        raise AssPipelineError(f"目录中未找到 ASS/SUP 字幕: {target_dir}")
 
     items = [
         MuxPlanItem(
