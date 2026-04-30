@@ -20,6 +20,7 @@
 - `/strm_status` 查看 STRM 监控服务状态
 - `/strm_scan` 手动触发一次 STRM 存量重扫
 - `/strm_restart` 手动重启 STRM watcher
+- `/emby_tasks` 打开 Emby 计划任务面板（查看 / 启动 / 停止 / 轮询通知开关）
 - `/rm_strm` 预览 STRM 空目录清理，并在消息按钮中确认/取消实际删除
 - 可选启用 STRM 监控：实时探测、重命名、失败归档、整目录移动到 DONE
 - 可选启用 STRM Telegram 通知：按目录批次/根目录文件聚合推送归档结果，统计项区分“重命名 / 原本已就绪 / 失败转移”
@@ -84,18 +85,17 @@
 
 ### 其他常用配置
 
-- `STRM_WATCH_ENABLED`：是否启用 STRM 监控
-- `STRM_WATCH_DIR` / `STRM_DONE_DIR` / `STRM_FAILED_DIR`
-- `STRM_FFPROBE_PATH`：默认 `/usr/local/bin/ffprobe`
-- `STRM_STATE_DIR`：manifest 批次状态目录，默认 `/app/data/strm_state`
-- `STRM_PROCESSING_LEASE_SECONDS`：processing 租约，默认 `1800`
-- `STRM_STATE_RETENTION_HOURS`：已完成/失败 manifest 自动清理保留期，默认 `168`
 - `STRM_PRUNE_ENABLED`：是否启用 `/rm_strm` 手动空目录清理
 - `STRM_PRUNE_ROOTS`：手动清理扫描根目录列表，使用 `|` 分隔
 - `STRM_PRUNE_ALLOW_DELETE_FIRST_LEVEL` / `STRM_PRUNE_INCLUDE_ROOTS`
 - `STRM_PRUNE_NOTIFY_EMBY`：删除后是否通知 Emby 局部刷新并补做递归刷新
 - `STRM_PRUNE_EMBY_URL` / `STRM_PRUNE_EMBY_API_KEY` / `STRM_PRUNE_EMBY_UPDATE_TYPE`
 - `STRM_PRUNE_HTTP_TIMEOUT` / `STRM_PRUNE_HTTP_RETRIES` / `STRM_PRUNE_HTTP_BACKOFF`
+- `EMBY_TASKS_ENABLED`：是否启用 `/emby_tasks` Emby 计划任务面板
+- `EMBY_TASKS_URL` / `EMBY_TASKS_API_KEY` / `EMBY_TASKS_SERVER_TYPE`
+- `EMBY_TASKS_NOTIFY_ENABLED`：默认是否开启后台轮询通知（任务完成 / 失败）
+- `EMBY_TASKS_POLL_INTERVAL` / `EMBY_TASKS_REQUEST_TIMEOUT` / `EMBY_TASKS_HTTP_RETRIES` / `EMBY_TASKS_HTTP_BACKOFF`
+- `EMBY_TASKS_STATE_PATH`：保存通知开关的本地状态文件
 
 说明：
 
@@ -103,7 +103,7 @@
 - `/points`、`/checkin` 和自动签到依赖 HDHive Premium 权限对应的 Open API
 - `MEDIA_BOT_DEBUG=true` 时会输出 DEBUG 日志，便于排查问题
 - `MEDIA_BOT_LOG_TO_FILE=0` 时，日志仅输出到 stdout/stderr，可直接用 `docker compose logs -f media_bot` 查看
-- `bot_chat_id` 配置后，STRM、`/ass` 和自动签到失败可发送 Telegram 通知
+- `bot_chat_id` 配置后，STRM、`/ass`、`/emby_tasks` 轮询结果和自动签到失败可发送 Telegram 通知
 - `/ass` 不写独立本地日志文件，运行详情直接进入 Docker 日志
 - `/ass -> 子集化字体` 在真正内嵌前会先把字体池中的 OTF 转成 TTF，并复制原字体 name table，后续只用纯 TTF/TTC 做匹配与内嵌
 - `/ass -> 子集化字体` 所使用的 ASS 字幕字体子集化与内嵌脚本/方法完全来自开源项目 [`wyzdwdz/assfonts`](https://github.com/wyzdwdz/assfonts)；本项目主要补充 Telegram 交互、批处理编排与工程化封装

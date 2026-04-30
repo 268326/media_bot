@@ -62,6 +62,7 @@ from aiogram import Bot, Dispatcher
 
 # 导入配置（这会自动验证配置）
 from config import BOT_TOKEN, DOTENV_PATH, HDHIVE_API_KEY, mask_secret
+from emby_task_service import emby_task_service
 
 # 导入处理器路由器
 from handlers import router
@@ -84,6 +85,9 @@ def health_snapshot() -> dict[str, object]:
         "unlock_queue_workers": len(hdhive_unlock_service.worker_tasks),
         "checkin_enabled": bool(checkin_scheduler.enabled),
         "checkin_scheduler_started": bool(checkin_scheduler.scheduler is not None),
+        "emby_tasks_enabled": bool(emby_task_service.settings.enabled),
+        "emby_tasks_notify_enabled": bool(emby_task_service.notify_enabled),
+        "emby_tasks_poller_running": bool(emby_task_service.poller_task and not emby_task_service.poller_task.done()),
     }
 
 
@@ -144,7 +148,7 @@ async def main():
     logging.info("✅ 会话管理器已启动")
     await checkin_scheduler.start(bot)
     await strm_service.start()
-    
+    await emby_task_service.start(bot)
     # 注册路由器
     dp.include_router(router)
     
@@ -163,6 +167,9 @@ async def main():
 
         # 停止自动签到调度
         await checkin_scheduler.stop()
+
+        # 停止 Emby 任务服务
+        await emby_task_service.stop()
 
         # 停止 STRM 监控服务
         await strm_service.stop()

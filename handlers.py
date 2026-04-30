@@ -65,6 +65,15 @@ from formatter import (
     format_help_message,
     format_start_message
 )
+from emby_task_service import emby_task_service
+from emby_task_formatter import (
+    EMBY_TASK_CALLBACK_PREFIX,
+    build_category_summary,
+    build_task_detail,
+    build_tasks_panel,
+    describe_filter_mode,
+    filter_tasks_for_view,
+)
 from strm_service import strm_service
 from strm_prune_service import strm_prune_service
 
@@ -86,6 +95,9 @@ resource_list_state: dict[str, dict] = {}
 # TMDB 候选列表状态缓存："chat_id:message_id" -> {"results": list[dict], "page": int}
 tmdb_search_state: dict[str, dict] = {}
 
+# Emby 任务列表状态缓存："chat_id:message_id" -> {"tasks": list[dict], "page": int, "owner_user_id": int}
+emby_task_state: dict[str, dict] = {}
+EMBY_TASK_STATE_LIMIT = 128
 
 TMDB_PAGE_SIZE = 5
 SA_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10, sock_read=30)
@@ -161,16 +173,72 @@ def make_message_state_key(message: Message | None) -> str | None:
     return f"{chat.id}:{message.message_id}"
 
 
-def format_duration_compact(seconds: float) -> str:
-    """把秒数格式化为适合 TG 提示的紧凑文本。"""
-    total = max(0, int(round(seconds)))
-    minutes, sec = divmod(total, 60)
-    hours, minutes = divmod(minutes, 60)
+
+
+def _build_emby_task_state(tasks: list[dict], *, page: int, owner_user_id: int, filter_mode: str = "all") -> dict:
+    return {
+        "tasks": tasks,
+        "page": page,
+        "owner_user_id": owner_user_id,
+        "filter_mode": filter_mode,
+    }
+
+
+
+PRO_QUICK_TASK_NAMES = [
+    "Refresh Episode",
+    "Update Plugin",
+    "Scan External Tracks",
+    "Build Douban Cache",
+    "Refresh Chinese Actor",
+    "Extract MediaInfo",
+]
+
+
+def _find_task_by_name(tasks: list[dict], task_name: str) -> dict | None:
+    for task in tasks:
+        if str(task.get("name") or task.get("display_name") or "") == str(task_name or ""):
+            return task
+    return None
+
+def _parse_emby_task_callback_value(raw: str) -> tuple[int, str]:
+    text = str(raw or "")
+    if "|" not in text:
+        return 0, text
+    page_raw, task_id = text.split("|", 1)
+    try:
+        page = int(page_raw)
+    except ValueError:
+        page = 0
+    return page, task_id
+
+
+
+
+def _build_pro_quick_actions(tasks: list[dict], filter_mode: str) -> list[tuple[str, str]]:
+    if filter_mode != "pro":
+        return []
+    actions: list[tuple[str, str]] = []
+    for task_name in PRO_QUICK_TASK_NAMES:
+        task = _find_task_by_name(tasks, task_name)
+        if not task:
+            continue
+        task_label = str(task.get("display_name") or task.get("name") or task_name)
+        if len(task_label) > 10:
+            task_label = task_label[:9] + "…"
+        actions.append((task_label, str(task.get("id") or "")))
+    return actions
+
+
+def format_duration_compact(seconds: float | int | None) -> str:
+    total_seconds = max(0, int(float(seconds or 0)))
+    minutes, secs = divmod(total_seconds, 60)
+    hours, mins = divmod(minutes, 60)
     if hours > 0:
-        return f"{hours}小时{minutes}分{sec}秒"
-    if minutes > 0:
-        return f"{minutes}分{sec}秒"
-    return f"{sec}秒"
+        return f"{hours}h {mins}m {secs}s"
+    if mins > 0:
+        return f"{mins}m {secs}s"
+    return f"{secs}s"
 
 
 async def notify_auto_unlock_failed(target_msg: Message, fallback_msg: Message):
@@ -716,6 +784,44 @@ async def pump_ass_mux_progress(bot, chat_id: int, message_id: int, session, pro
             logging.debug("更新 /ass 字幕内封进度消息失败: %s", exc)
 
 
+
+
+@router.message(Command("emby_tasks"))
+async def cmd_emby_tasks(message: Message):
+    if not await check_user_permission(message):
+        return
+
+    wait_msg = await message.reply("🧩 正在读取 Emby 计划任务…", parse_mode="HTML")
+    result = await emby_task_service.list_tasks()
+    if not result.get("ok"):
+        await wait_msg.edit_text(f"❌ {html.escape(str(result.get('message') or '未知错误'))}", parse_mode="HTML")
+        return
+
+    tasks = result.get("tasks") or []
+    page = 0
+    filter_mode = "pro"
+    quick_actions: list[tuple[str, str]] = _build_pro_quick_actions(tasks, filter_mode)
+
+    panel_text, kb = build_tasks_panel(
+        tasks,
+        page=page,
+        notify_enabled=bool(emby_task_service.notify_enabled),
+        status=result.get("status"),
+        filter_mode=filter_mode,
+        quick_actions=quick_actions,
+    )
+    state_key = make_message_state_key(wait_msg)
+    if state_key:
+        emby_task_state[state_key] = _build_emby_task_state(
+            tasks,
+            page=page,
+            owner_user_id=message.from_user.id,
+            filter_mode=filter_mode,
+        )
+        trim_dict_cache(emby_task_state, EMBY_TASK_STATE_LIMIT)
+    await wait_msg.edit_text(panel_text, reply_markup=kb, parse_mode="HTML")
+
+
 @router.message(Command("strm_status"))
 async def cmd_strm_status(message: Message):
     if not await check_user_permission(message):
@@ -733,7 +839,6 @@ async def cmd_strm_status(message: Message):
         f"LAST_ERROR: <code>{st['last_error'] or '-'}</code>"
     )
     await message.reply(text, parse_mode="HTML")
-
 
 @router.message(Command("strm_scan"))
 async def cmd_strm_scan(message: Message):
@@ -1559,6 +1664,224 @@ async def callback_ass_mux(callback: CallbackQuery):
             pass
 
 
+
+
+@router.callback_query(F.data.startswith(f"{EMBY_TASK_CALLBACK_PREFIX}:"))
+async def callback_emby_task(callback: CallbackQuery):
+    if not await check_callback_permission(callback):
+        return
+
+    msg = callback.message
+    if not msg:
+        await callback.answer()
+        return
+
+    state_key = make_message_state_key(msg)
+    state = emby_task_state.get(state_key or "")
+    if not state:
+        await callback.answer("任务面板已失效，请重新发送 /emby_tasks", show_alert=True)
+        return
+
+    if int(state.get("owner_user_id") or 0) != callback.from_user.id:
+        await callback.answer("只能由发起人操作", show_alert=True)
+        return
+
+    data = (callback.data or "").split(":", 2)
+    action = data[1] if len(data) > 1 else ""
+    raw_value = data[2] if len(data) > 2 else ""
+    page = int(state.get("page", 0) or 0)
+    filter_mode = str(state.get("filter_mode") or "all")
+
+    if action == "noop":
+        await callback.answer()
+        return
+
+    if action == "toggle_notify":
+        enabled = await emby_task_service.toggle_notify()
+        result = await emby_task_service.list_tasks()
+        if not result.get("ok"):
+            await callback.answer("切换成功，但刷新任务列表失败", show_alert=True)
+            return
+        tasks = result.get("tasks") or []
+        quick_actions = _build_pro_quick_actions(tasks, filter_mode)
+        panel_text, kb = build_tasks_panel(
+            tasks,
+            page=page,
+            notify_enabled=enabled,
+            status=result.get("status"),
+            filter_mode=filter_mode,
+            quick_actions=quick_actions,
+        )
+        emby_task_state[state_key or ""] = _build_emby_task_state(
+            tasks,
+            page=page,
+            owner_user_id=callback.from_user.id,
+            filter_mode=filter_mode,
+        )
+        trim_dict_cache(emby_task_state, EMBY_TASK_STATE_LIMIT)
+        await msg.edit_text(panel_text, reply_markup=kb, parse_mode="HTML")
+        await callback.answer(f"通知已{'开启' if enabled else '关闭'}")
+        return
+
+    if action == "summary":
+        tasks = state.get("tasks") or []
+        current_tasks = filter_tasks_for_view(tasks, filter_mode)
+        await callback.answer()
+        await msg.reply(
+            build_category_summary(current_tasks, title=f"{describe_filter_mode(filter_mode)}视图统计"),
+            parse_mode="HTML",
+        )
+        return
+
+    if action == "filter":
+        allowed_filters = {"all", "running", "pro", "library", "maintenance", "app"}
+        filter_mode = raw_value if raw_value in allowed_filters else "all"
+        page = 0
+        result = await emby_task_service.list_tasks()
+        if not result.get("ok"):
+            await callback.answer("切换视图失败", show_alert=True)
+            return
+        tasks = result.get("tasks") or []
+        quick_actions = _build_pro_quick_actions(tasks, filter_mode)
+        panel_text, kb = build_tasks_panel(
+            tasks,
+            page=page,
+            notify_enabled=bool(emby_task_service.notify_enabled),
+            status=result.get("status"),
+            filter_mode=filter_mode,
+            quick_actions=quick_actions,
+        )
+        emby_task_state[state_key or ""] = _build_emby_task_state(
+            tasks,
+            page=page,
+            owner_user_id=callback.from_user.id,
+            filter_mode=filter_mode,
+        )
+        trim_dict_cache(emby_task_state, EMBY_TASK_STATE_LIMIT)
+        await msg.edit_text(panel_text, reply_markup=kb, parse_mode="HTML")
+        await callback.answer(f"已切换到{describe_filter_mode(filter_mode)}视图")
+        return
+
+    if action == "quick_start":
+        task_id = raw_value
+        op_result = await emby_task_service.start_task(task_id)
+        result = await emby_task_service.list_tasks()
+        if not result.get("ok"):
+            await msg.edit_text(f"❌ {html.escape(str(result.get('message') or '未知错误'))}", parse_mode="HTML")
+            return
+        tasks = result.get("tasks") or []
+        quick_actions = _build_pro_quick_actions(tasks, filter_mode)
+        page = 0
+        panel_text, kb = build_tasks_panel(
+            tasks,
+            page=page,
+            notify_enabled=bool(emby_task_service.notify_enabled),
+            status=result.get("status"),
+            filter_mode=filter_mode,
+            quick_actions=quick_actions,
+        )
+        emby_task_state[state_key or ""] = _build_emby_task_state(
+            tasks,
+            page=page,
+            owner_user_id=callback.from_user.id,
+            filter_mode=filter_mode,
+        )
+        trim_dict_cache(emby_task_state, EMBY_TASK_STATE_LIMIT)
+        await msg.edit_text(panel_text, reply_markup=kb, parse_mode="HTML")
+        await callback.answer(
+            str(op_result.get("message") or ("操作成功" if op_result.get("ok") else "操作失败")),
+            show_alert=not bool(op_result.get("ok")),
+        )
+        return
+
+    if action in {"page", "refresh"}:
+        if action == "page":
+            try:
+                page = int(raw_value)
+            except ValueError:
+                page = 0
+        result = await emby_task_service.list_tasks()
+        if not result.get("ok"):
+            await callback.answer("刷新失败", show_alert=True)
+            await msg.edit_text(f"❌ {html.escape(str(result.get('message') or '未知错误'))}", parse_mode="HTML")
+            return
+        tasks = result.get("tasks") or []
+        quick_actions = _build_pro_quick_actions(tasks, filter_mode)
+        panel_text, kb = build_tasks_panel(
+            tasks,
+            page=page,
+            notify_enabled=bool(emby_task_service.notify_enabled),
+            status=result.get("status"),
+            filter_mode=filter_mode,
+            quick_actions=quick_actions,
+        )
+        emby_task_state[state_key or ""] = _build_emby_task_state(
+            tasks,
+            page=page,
+            owner_user_id=callback.from_user.id,
+            filter_mode=filter_mode,
+        )
+        trim_dict_cache(emby_task_state, EMBY_TASK_STATE_LIMIT)
+        await msg.edit_text(panel_text, reply_markup=kb, parse_mode="HTML")
+        await callback.answer("已刷新")
+        return
+
+    if action == "detail":
+        task_id = raw_value
+        result = await emby_task_service.list_tasks()
+        if not result.get("ok"):
+            await callback.answer("刷新详情失败", show_alert=True)
+            return
+        tasks = result.get("tasks") or []
+        try:
+            detail_text, kb = build_task_detail(tasks, task_id, page=page, filter_mode=filter_mode)
+        except IndexError:
+            await callback.answer("任务已不存在或当前视图不可见", show_alert=True)
+            return
+        emby_task_state[state_key or ""] = _build_emby_task_state(
+            tasks,
+            page=page,
+            owner_user_id=callback.from_user.id,
+            filter_mode=filter_mode,
+        )
+        trim_dict_cache(emby_task_state, EMBY_TASK_STATE_LIMIT)
+        await msg.edit_text(detail_text, reply_markup=kb, parse_mode="HTML")
+        await callback.answer()
+        return
+
+    if action in {"start", "stop"}:
+        task_id = raw_value
+        op_result = await (emby_task_service.start_task(task_id) if action == "start" else emby_task_service.stop_task(task_id))
+        result = await emby_task_service.list_tasks()
+        if not result.get("ok"):
+            await msg.edit_text(f"❌ {html.escape(str(result.get('message') or '未知错误'))}", parse_mode="HTML")
+            return
+        tasks = result.get("tasks") or []
+        emby_task_state[state_key or ""] = _build_emby_task_state(
+            tasks,
+            page=page,
+            owner_user_id=callback.from_user.id,
+            filter_mode=filter_mode,
+        )
+        trim_dict_cache(emby_task_state, EMBY_TASK_STATE_LIMIT)
+        try:
+            detail_text, kb = build_task_detail(tasks, task_id, page=page, filter_mode=filter_mode)
+            await msg.edit_text(detail_text, reply_markup=kb, parse_mode="HTML")
+        except IndexError:
+            quick_actions = _build_pro_quick_actions(tasks, filter_mode)
+            panel_text, kb = build_tasks_panel(
+                tasks,
+                page=page,
+                notify_enabled=bool(emby_task_service.notify_enabled),
+                status=result.get("status"),
+                filter_mode=filter_mode,
+                quick_actions=quick_actions,
+            )
+            await msg.edit_text(panel_text, reply_markup=kb, parse_mode="HTML")
+        await callback.answer(str(op_result.get("message") or ("操作成功" if op_result.get("ok") else "操作失败")), show_alert=not bool(op_result.get("ok")))
+        return
+
+    await callback.answer("未知操作", show_alert=True)
 
 @router.callback_query(F.data.startswith("rm_strm_confirm:"))
 async def callback_rm_strm_confirm(callback: CallbackQuery):

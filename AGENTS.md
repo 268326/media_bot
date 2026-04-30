@@ -255,6 +255,7 @@ ass_mux_config.py + ass_mux_planner.py + ass_mux_pipeline.py + ass_formatter.py 
 - `/strm_scan`
 - `/strm_restart`
 - `/rm_strm`
+- `/emby_tasks`
 - `/hdc`
 - `/llog`
 - `/hdt`
@@ -283,6 +284,23 @@ ass_mux_config.py + ass_mux_planner.py + ass_mux_pipeline.py + ass_formatter.py 
 - `ass_mux:run_confirm`
 - `ass_mux:run_now`
 - `ass_mux:cancel`
+
+### 5.3 `/emby_tasks` 的主要回调类型
+当前主要包含：
+- `emby_task:page:<n>`
+- `emby_task:refresh:<page>`
+- `emby_task:filter:<mode>`
+- `emby_task:detail:<task_id>`
+- `emby_task:start:<task_id>`
+- `emby_task:stop:<task_id>`
+- `emby_task:quick_start:<task_id>`
+- `emby_task:toggle_notify:<page>`
+- `emby_task:summary:<mode>`
+
+要点：
+- 当前默认打开 `💎PRO` 视图，并可展示 PRO 常用任务快捷启动区
+- 详情页返回列表时应回到“任务当前所在页”，不要依赖旧 `state.page`
+- 轮询通知关闭后再开启时，应先重建快照，避免把关闭期间历史完成任务补发出来
 
 ---
 
@@ -318,7 +336,14 @@ ass_mux_config.py + ass_mux_planner.py + ass_mux_pipeline.py + ass_formatter.py 
 | `ass_formatter.py` | `/ass` 菜单、面板、确认页、执行中、汇总等全部 TG 文案与按钮 | 改手机端文案、按钮布局、执行态展示 |
 | `ass_service.py` | `/ass` 服务门面、互斥锁、会话状态、输入应用、通知 | 改会话交互、会话级并发数、汇总通知 |
 
-### 6.4 STRM 相关
+### 6.4 Emby 任务相关
+
+| 文件 | 作用 | 改动时机 |
+|---|---|---|
+| `emby_task_service.py` | Emby / Jellyfin ScheduledTasks 拉取、启动/停止、后台轮询通知、状态文件持久化 | 改服务端 API、重试、轮询通知、状态持久化 |
+| `emby_task_formatter.py` | `/emby_tasks` 面板、详情页、分类统计、筛选与快捷按钮 | 改任务展示文案、分页、筛选、手机端按钮布局 |
+
+### 6.5 STRM 相关
 
 | 文件 | 作用 | 改动时机 |
 |---|---|---|
