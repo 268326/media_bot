@@ -23,6 +23,15 @@ NOT_GROUP_TOKENS = {
     "HDR", "HDR10", "HDR10+", "SDR", "HLG", "DV", "DOVI", "HEVC", "H264", "X264", "H265", "X265", "AVC",
 }
 
+TECH_GROUP_TOKENS = NOT_GROUP_TOKENS | {
+    "UHD", "8K", "4K",
+    "AV1",
+    "DTS", "HD", "MA", "HRA",
+    "TRUEHD", "DOLBY", "ATMOS",
+    "DDP", "EAC3", "DD+", "AC3", "DD",
+    "AAC", "FLAC", "OPUS", "PCM",
+}
+
 DELIM_CLASS = r"[.\-\s_\[\](){}]"
 NO_RELEASE_GROUP_TAIL_PATTERNS = [
     r"WEB[.\-_ ]?DL",
@@ -31,6 +40,22 @@ NO_RELEASE_GROUP_TAIL_PATTERNS = [
     r"DTS[.\-_ ]?HD(?:[.\-_ ]?(?:MA|HRA))?",
     r"(?:TRUEHD|DOLBY)[.\-_ ]?ATMOS",
 ]
+
+
+def looks_like_group_token(token: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_@&]{0,31}", token))
+
+
+def looks_like_tech_group_token(token: str) -> bool:
+    token_upper = token.upper()
+    if token_upper in TECH_GROUP_TOKENS:
+        return True
+    return bool(
+        re.fullmatch(
+            r"(?i)(?:2160p|1080p|720p|1080i|720i|4k|8k|UHD|\d+(?:\.\d+)?fps|(?:8|10|12|14|16)bit|(?:[1257]\.0|[1257]\.1)|\d+ch|DVP\d+)",
+            token,
+        )
+    )
 
 
 def extract_source_tags(name_part: str) -> list[str]:
@@ -67,21 +92,26 @@ def extract_release_group(name_part: str) -> tuple[str, str]:
     if looks_like_hyphenated_tech_tail(name_part):
         return name_part, ""
 
-    left, grp = name_part.rsplit("-", 1)
-    grp = grp.strip()
-    if not left or not grp:
+    parts = name_part.split("-")
+    if len(parts) < 2:
         return name_part, ""
 
-    grp_upper = grp.upper()
-    if grp_upper in NOT_GROUP_TOKENS:
-        return name_part, ""
+    max_suffix_parts = min(4, len(parts) - 1)
+    for size in range(max_suffix_parts, 0, -1):
+        left = "-".join(parts[:-size]).strip()
+        grp = "-".join(parts[-size:]).strip()
+        if not left or not grp:
+            continue
 
-    # 发布组通常是末尾一个相对独立的 token；若包含点/空格等更像技术标签片段，
-    # 则不要当作发布组，避免把 "WEB-DL" 拆成 "WEB" + "-DL"。
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", grp):
-        return name_part, ""
+        grp_tokens = [token for token in grp.split("-") if token]
+        if not grp_tokens or any(not looks_like_group_token(token) for token in grp_tokens):
+            continue
+        if all(looks_like_tech_group_token(token) for token in grp_tokens):
+            continue
 
-    return left, "-" + grp
+        return left, "-" + grp
+
+    return name_part, ""
 
 
 def cleanup_body(s: str) -> str:
