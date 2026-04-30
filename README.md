@@ -15,7 +15,7 @@
 - 自动签到失败时通知 `bot_chat_id`（若为空则回退 `bot_user_id`）
 - `/danmu` 下载 B 站弹幕 XML
 - `/ass` 打开 ASS 菜单：
-  - 子集化字体：ASS 字幕纯 TTF 字体子集化并生成 `*.assfonts.ass`
+  - 子集化字体：基于 [assfonts](https://github.com/wyzdwdz/assfonts) 的 ASS 字幕纯 TTF 字体子集化并生成 `*.assfonts.ass`
   - 内封字幕：把同目录匹配到的 `.ass/.sup` 内封到 `.mkv`
 - `/strm_status` 查看 STRM 监控服务状态
 - `/strm_scan` 手动触发一次 STRM 存量重扫
@@ -106,6 +106,7 @@
 - `bot_chat_id` 配置后，STRM、`/ass` 和自动签到失败可发送 Telegram 通知
 - `/ass` 不写独立本地日志文件，运行详情直接进入 Docker 日志
 - `/ass -> 子集化字体` 在真正内嵌前会先把字体池中的 OTF 转成 TTF，并复制原字体 name table，后续只用纯 TTF/TTC 做匹配与内嵌
+- `/ass -> 子集化字体` 所使用的 ASS 字幕字体子集化与内嵌脚本/方法完全来自开源项目 [`wyzdwdz/assfonts`](https://github.com/wyzdwdz/assfonts)；本项目主要补充 Telegram 交互、批处理编排与工程化封装
 - `/ass -> 内封字幕` 使用 `mkvmerge` 写回原 MKV；支持在 Telegram 中逐项修改默认字幕组、语言、字幕文件名，并可切换 DRY-RUN / 删除外挂字幕
 - `/ass -> 内封字幕` 现已内置标准模式超时保护：空闲超时 30 分钟、总时长 2 小时仅告警、12 小时极限保险，不提供 TG 选择按钮
 - `/ass -> 内封字幕` 已支持 Telegram 中按页翻页预览计划细节，并在执行确认前显示磁盘空间、源视频总大小、平均/最大单集大小、预计临时占用、是否同分区等信息
@@ -173,3 +174,25 @@ ASS_MUX_JOBS=2
   - 可切换 `DRY-RUN` 与“删除外挂字幕”
   - 确认后调用 `mkvmerge` 并在 Docker 日志输出逐集过程
   - 完成后向 Telegram 返回汇总通知
+
+## 第三方项目声明与致谢
+
+### assfonts 来源声明
+
+- 本项目中 `/ass -> 子集化字体` 所使用的字幕内嵌子集化字体核心脚本、处理方法与命令行能力，完全来自开源项目 [`wyzdwdz/assfonts`](https://github.com/wyzdwdz/assfonts)。
+- 当前 `media_bot` 对该能力的工作主要是面向 Telegram Bot 使用场景做工程化封装与集成，包括目录扫描、批处理编排、OTF 预转 TTF、name table 复制、执行日志输出、汇总通知，以及 `/ass` 菜单交互。
+- 本项目 Dockerfile 在构建镜像时会下载并安装 `assfonts` 官方发布的 CLI；`/ass -> 子集化字体` 流水线实际通过调用该上游工具完成核心处理。
+- 除上述工程化封装与交互集成外，本项目不对 `assfonts` 的字体子集化 / 字体内嵌算法、实现或方法主张原创性。
+
+### 致谢
+
+- 感谢 [`wyzdwdz`](https://github.com/wyzdwdz) 开源并持续维护 `assfonts` 项目，使 ASS 字幕字体子集化与内嵌流程可以稳定复用到本项目中。
+- `assfonts` 项目主页：<https://github.com/wyzdwdz/assfonts>
+
+### 许可证说明
+
+- 根据 `assfonts` 上游仓库公开信息，其许可证为 **GNU General Public License v3.0 (GPL-3.0)**。
+- 使用、分发或二次集成本项目中 `/ass -> 子集化字体` 相关能力时，请同时关注并遵守 `assfonts` 上游项目的许可证、版权声明及其附带要求。
+- 上游文档与许可证请以官方仓库为准：
+  - README：<https://github.com/wyzdwdz/assfonts/blob/main/README.md>
+  - LICENSE：<https://github.com/wyzdwdz/assfonts/blob/main/LICENSE>
