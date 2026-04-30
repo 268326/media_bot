@@ -196,6 +196,12 @@ class AssService:
             return False
         return session.owner_user_id == user_id
 
+    def count_mux_executable_items(self, chat_id: int, owner_user_id: int) -> int:
+        session = self.get_mux_session(chat_id, owner_user_id)
+        if not session or not session.plan:
+            return 0
+        return sum(1 for item in session.plan.items if item.subs)
+
     async def build_mux_settings_summary(self, chat_id: int, owner_user_id: int) -> str:
         session = self.get_mux_session(chat_id, owner_user_id)
         if not session:

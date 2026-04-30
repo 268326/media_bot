@@ -79,6 +79,7 @@ def build_mux_menu_keyboard(menu_prefix: str) -> InlineKeyboardMarkup:
 
 def format_mux_session(session: Any) -> str:
     mode_label = '手动' if getattr(session, 'mode', 'auto') == 'manual' else '自动'
+    executable_items = sum(1 for item in session.plan.items if getattr(item, 'subs', None)) if session.plan else 0
     lines = [
         '🎛️ <b>/ass · 字幕内封控制面板</b>',
         '─────────────────',
@@ -95,7 +96,7 @@ def format_mux_session(session: Any) -> str:
         preview_mode = '总览' if session.preview_mode == 'summary' else '列表'
         lines.extend([
             '',
-            f'📊 计划: <code>{len(session.plan.items)}</code> 集 / <code>{session.plan.total_sub_tracks}</code> 条字幕轨',
+            f'📊 视频总数: <code>{len(session.plan.items)}</code> · 本次将执行: <code>{executable_items}</code> · 字幕轨: <code>{session.plan.total_sub_tracks}</code>',
             f'🧭 编辑页: <code>{session.plan_page + 1}</code>/<code>{total_pages}</code>',
             f'👀 预览: <code>{preview_mode}</code> · 同面板显示',
             '👆 轻触数字进入单集编辑。',
@@ -172,6 +173,7 @@ def format_mux_preview_list(
 
 def build_mux_plan_keyboard(session: Any, current_items: list[tuple[int, Any]], total_pages: int, mux_prefix: str) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+    executable_items = sum(1 for item in (session.plan.items if session.plan else []) if getattr(item, 'subs', None))
     if session.plan:
         button_row: list[InlineKeyboardButton] = []
         for index, _item in current_items:
@@ -218,7 +220,7 @@ def build_mux_plan_keyboard(session: Any, current_items: list[tuple[int, Any]], 
             InlineKeyboardButton(text='❎ 取消当前输入', callback_data=f'{mux_prefix}cancel_prompt'),
         ])
     action_row = [InlineKeyboardButton(text='🔄 重新扫描', callback_data=f'{mux_prefix}refresh')]
-    if session.plan:
+    if session.plan and executable_items > 0:
         action_row.append(InlineKeyboardButton(text='▶️ 开始执行', callback_data=f'{mux_prefix}run_confirm'))
     rows.append(action_row)
     rows.append([InlineKeyboardButton(text='❎ 结束会话', callback_data=f'{mux_prefix}cancel')])
@@ -329,6 +331,7 @@ def build_mux_run_confirm_keyboard(mux_prefix: str) -> InlineKeyboardMarkup:
 
 
 def format_mux_run_confirm(session: Any, stats: dict[str, Any], fmt_bytes_func) -> str:
+    executable_items = sum(1 for item in session.plan.items if getattr(item, 'subs', None))
     free_bytes = int(stats['tmp_free_bytes'])
     total_bytes = int(stats['tmp_total_bytes'])
     est_tmp = int(stats['estimated_tmp_bytes'])
@@ -343,7 +346,7 @@ def format_mux_run_confirm(session: Any, stats: dict[str, Any], fmt_bytes_func) 
         '⚠️ <b>/ass · 执行确认</b>',
         '─────────────────',
         f'📂 目录: <code>{html.escape(str(session.settings.target_dir))}</code>',
-        f'🎬 计划视频: <code>{len(session.plan.items)}</code> · 🎞️ 字幕轨: <code>{session.plan.total_sub_tracks}</code>',
+        f'🎬 本次将执行: <code>{executable_items}</code> · 字幕轨: <code>{session.plan.total_sub_tracks}</code>',
         f'⚙️ 并发: <code>{session.settings.jobs}</code> · 🧪 DRY: <code>{session.dry_run}</code>',
         f'🗑️ 外挂字幕: <code>{session.delete_external_subs}</code>',
         f'🎯 默认字幕轨: <code>{session.settings.set_default_subtitle}</code>（简体双语优先，简体回退，含 MKV 内置字幕）',
@@ -354,7 +357,7 @@ def format_mux_run_confirm(session: Any, stats: dict[str, Any], fmt_bytes_func) 
         f'📏 单集大小: 平均 <code>{fmt_bytes_func(avg_source)}</code> / 最大 <code>{fmt_bytes_func(max_source)}</code>',
         f'💾 预计临时占用: <code>{fmt_bytes_func(est_tmp)}</code>',
         f'🗄️ 临时目录剩余: <code>{fmt_bytes_func(free_bytes)}</code>' + (f' / <code>{fmt_bytes_func(total_bytes)}</code>' if total_bytes > 0 else ''),
-        f'📍 临时目录与视频同分区: <code>{temp_same_fs}</code> (<code>{same_fs_count}</code>/<code>{len(session.plan.items)}</code>)',
+        f'📍 临时目录与视频同分区: <code>{temp_same_fs}</code> (<code>{same_fs_count}</code>/<code>{executable_items}</code>)',
     ]
     if duplicate_subtitle_refs > 0:
         lines.append(f'♻️ 重复引用字幕文件: <code>{duplicate_subtitle_refs}</code>')

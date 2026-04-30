@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import queue
+import re
 import shutil
 import subprocess
 import threading
@@ -321,9 +322,26 @@ def subtitle_preference_score(lang_raw: str) -> int:
     text = str(lang_raw or '').strip().lower()
     if not text:
         return 0
-    if text.startswith('chs_') and text != 'chs':
+
+    normalized = re.sub(r"[\s&+\-/|／＋＆｜]+", "_", text)
+    parts = [part for part in normalized.split('_') if part]
+    aliases = {
+        'chs': 'chs', 'sc': 'chs', 'zh': 'chs', 'cn': 'chs', 'gb': 'chs', 'gbk': 'chs', 'gb2312': 'chs', 'zhhans': 'chs', 'zhcn': 'chs', 'zhchs': 'chs',
+        'cht': 'cht', 'tc': 'cht', 'tw': 'cht', 'hk': 'cht', 'big5': 'cht', 'zhhant': 'cht', 'zhtw': 'cht', 'zhhk': 'cht',
+        'jpn': 'jpn', 'ja': 'jpn', 'jp': 'jpn',
+        'eng': 'eng', 'en': 'eng',
+    }
+    canonical_parts: list[str] = []
+    for part in parts:
+        canonical = aliases.get(part, part)
+        if canonical not in canonical_parts:
+            canonical_parts.append(canonical)
+
+    if not canonical_parts:
+        return 0
+    if 'chs' in canonical_parts and len(canonical_parts) >= 2:
         return 300
-    if text == 'chs':
+    if canonical_parts == ['chs']:
         return 200
     return 0
 
@@ -416,8 +434,10 @@ def process_one_item(
     cmd = [settings.mkvmerge_bin, "-o", str(tmp_path)]
     if default_candidate is not None:
         for track in mkv_subtitle_tracks:
-            default_value = '1' if default_candidate['source'] == 'internal' and int(track.get('id') or 0) == int(default_candidate.get('track_id') or -1) else '0'
-            cmd.extend(["--default-track-flag", f"{int(track.get('id') or 0)}:{default_value}"])
+            track_id = int(track.get('id') if track.get('id') is not None else 0)
+            candidate_track_id = default_candidate.get('track_id')
+            default_value = '1' if default_candidate['source'] == 'internal' and candidate_track_id is not None and track_id == int(candidate_track_id) else '0'
+            cmd.extend(["--default-track-flag", f"{track_id}:{default_value}"])
         _log(prefix, f"Auto default subtitle => {default_candidate['source']} / {default_candidate.get('lang_raw')} / {default_candidate.get('track_name')}")
     cmd.append(str(mkv_path))
 
@@ -430,7 +450,8 @@ def process_one_item(
                 failures.append(msg)
             return 4
         if default_candidate is not None:
-            default_value = '1' if default_candidate['source'] == 'external' and int(default_candidate.get('sub_index') or -1) == sub_index else '0'
+            candidate_sub_index = default_candidate.get('sub_index')
+            default_value = '1' if default_candidate['source'] == 'external' and candidate_sub_index is not None and int(candidate_sub_index) == sub_index else '0'
             cmd.extend(["--default-track-flag", f"0:{default_value}"])
         cmd.extend([
             "--language", f"0:{sub.mkv_lang}",

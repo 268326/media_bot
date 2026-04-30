@@ -690,7 +690,7 @@ async def sync_ass_mux_view(bot, chat_id: int, user_id: int):
 
 async def pump_ass_mux_progress(bot, chat_id: int, message_id: int, session, progress_queue: asyncio.Queue[MuxProgressEvent | None]):
     last_processed = 0
-    last_total = len(session.plan.items) if session.plan else 0
+    last_total = sum(1 for item in session.plan.items if getattr(item, 'subs', None)) if session.plan else 0
     while True:
         event = await progress_queue.get()
         if event is None:
@@ -1506,7 +1506,7 @@ async def callback_ass_mux(callback: CallbackQuery):
             session = ass_service.get_mux_session(msg.chat.id, callback.from_user.id)
             if not session or not session.plan:
                 raise RuntimeError("当前会话已失效，请重新发送 /ass")
-            total_items = len(session.plan.items)
+            total_items = ass_service.count_mux_executable_items(msg.chat.id, callback.from_user.id)
             progress_queue: asyncio.Queue[MuxProgressEvent | None] = asyncio.Queue()
             loop = asyncio.get_running_loop()
 

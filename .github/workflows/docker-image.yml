@@ -11,7 +11,6 @@ on:
       - "*.md"
       - "**/*.md"
       - ".env.example"
-      - "文档/**"
   workflow_dispatch:
 
 permissions:
