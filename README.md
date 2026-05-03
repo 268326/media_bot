@@ -8,7 +8,7 @@
 - `/hdm` 搜索电影资源
 - 直接发送 HDHive 链接自动解析（可通过 `HDHIVE_PARSE_INCOMING_LINKS` 开关控制）
 - 积分解锁（支持阈值自动解锁）
-- HDHive 解锁请求统一走队列排队，并支持每秒限速
+- HDHive 解锁请求统一走队列排队，并支持每分限速
 - `/points` 查询积分
 - `/checkin` 手动每日签到
 - `CHECKIN_CRON` 定时自动签到
@@ -36,7 +36,7 @@
 
 - `bot_user_id`：可使用 Telegram 机器人的用户 ID 清单，多个用户用 `,` 分隔；留空则所有用户都能使用
 - `AUTO_UNLOCK_THRESHOLD`
-- `HDHIVE_UNLOCK_RATE_LIMIT_PER_SECOND`：HDHive 解锁队列限速，默认每秒 `3` 次
+- `HDHIVE_UNLOCK_RATE_LIMIT_PER_MINUTE`：HDHive 解锁队列限速，默认每分 `3` 次
 - `HDHIVE_PARSE_INCOMING_LINKS`：是否自动解析聊天中直接收到的 HDHive 链接（默认开启）
 - `CHECKIN_CRON`：5 段 cron，留空禁用自动签到
 - `CHECKIN_TIMEZONE`：默认 `Asia/Shanghai`

@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any, Awaitable, Callable
 
-from config import HDHIVE_UNLOCK_RATE_LIMIT_PER_SECOND
+# 注意：这里假设你在 config 中把变量名也改为了 PER_MINUTE
+from config import HDHIVE_UNLOCK_RATE_LIMIT_PER_MINUTE
 from hdhive_auth import build_authenticated_session, request_open_api_json
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ class UnlockQueueNotice:
     ahead_count: int
     wait_seconds: float
     queued_seconds: float
-    rate_limit_per_second: int
+    rate_limit_per_minute: int  # 变量名改为 per_minute
     user_id: int | None = None
 
 
@@ -63,8 +64,9 @@ def _request_unlock_sync(resource_id: str) -> dict[str, Any]:
 
 class HDHiveUnlockService:
     def __init__(self):
-        self.rate_limit_per_second = HDHIVE_UNLOCK_RATE_LIMIT_PER_SECOND
-        self.worker_count = max(1, self.rate_limit_per_second)
+        self.rate_limit_per_minute = HDHIVE_UNLOCK_RATE_LIMIT_PER_MINUTE  # 改为 per_minute
+        # worker 数量可以保持原逻辑，或者你觉得 60/分 不需要太多 worker，也可以手动限制，比如 max(1, min(10, self.rate_limit_per_minute))
+        self.worker_count = max(1, self.rate_limit_per_minute)
         self.queue: asyncio.Queue[UnlockJob] | None = None
         self.worker_tasks: list[asyncio.Task] = []
         self.slot_lock: asyncio.Lock | None = None
@@ -92,8 +94,8 @@ class HDHiveUnlockService:
             self.started = True
 
         logger.info(
-            "✅ HDHive 解锁队列已启动: rate_limit=%s 次/秒 workers=%s",
-            self.rate_limit_per_second,
+            "✅ HDHive 解锁队列已启动: rate_limit=%s 次/分 workers=%s",  # 日志更新
+            self.rate_limit_per_minute,
             self.worker_count,
         )
 
@@ -241,14 +243,17 @@ class HDHiveUnlockService:
 
             async with lock:
                 now = time.monotonic()
-                while self.timestamps and now - self.timestamps[0] >= 1.0:
+                # 核心修改：时间窗口改为 60.0 秒
+                while self.timestamps and now - self.timestamps[0] >= 60.0:
                     self.timestamps.popleft()
 
-                if len(self.timestamps) < self.rate_limit_per_second:
+                # 判断一分钟内的请求数
+                if len(self.timestamps) < self.rate_limit_per_minute:
                     self.timestamps.append(now)
                     return
 
-                wait_seconds = max(0.0, 1.0 - (now - self.timestamps[0]))
+                # 核心修改：等待时间基于 60 秒计算
+                wait_seconds = max(0.0, 60.0 - (now - self.timestamps[0]))
                 queued_seconds = max(0.0, now - job.created_at)
                 with self.state_lock:
                     live_position = self._compute_live_position_unlocked(job.sequence)
@@ -256,13 +261,13 @@ class HDHiveUnlockService:
 
             if not job.wait_logged:
                 logger.warning(
-                    "⏳ HDHive 解锁触发限速，排队等待: resource=%s position=%s ahead=%s wait=%.2fs queued=%.2fs rate_limit=%s/s user=%s",
+                    "⏳ HDHive 解锁触发限速，排队等待: resource=%s position=%s ahead=%s wait=%.2fs queued=%.2fs rate_limit=%s/分 user=%s", # 日志更新
                     job.resource_id,
                     live_position,
                     ahead_count,
                     wait_seconds,
                     queued_seconds,
-                    self.rate_limit_per_second,
+                    self.rate_limit_per_minute,
                     job.user_id or "-",
                 )
                 job.wait_logged = True
@@ -271,7 +276,7 @@ class HDHiveUnlockService:
                 job.wait_callback is not None
                 and (
                     not job.wait_notified
-                    or (now - job.last_notice_at) >= 1.0
+                    or (now - job.last_notice_at) >= 1.0  # 仍然每秒触发一次通知，方便前端更新倒计时
                 )
             )
             if should_notify:
@@ -281,7 +286,7 @@ class HDHiveUnlockService:
                     ahead_count=ahead_count,
                     wait_seconds=wait_seconds,
                     queued_seconds=queued_seconds,
-                    rate_limit_per_second=self.rate_limit_per_second,
+                    rate_limit_per_minute=self.rate_limit_per_minute,
                     user_id=job.user_id,
                 )
                 try:
@@ -291,6 +296,7 @@ class HDHiveUnlockService:
                 job.wait_notified = True
                 job.last_notice_at = time.monotonic()
 
+            # 每次最多只睡 1 秒，醒来后循环检查。这保证了排队期间每秒都能正确调用 wait_callback 进行进度通知
             await asyncio.sleep(min(wait_seconds, 1.0))
 
 

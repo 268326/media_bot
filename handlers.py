@@ -275,7 +275,7 @@ async def update_unlock_queue_notice(
             f"👥 {ahead_text}\n"
             f"⌛ 已累计等待: <code>{queued_text}</code>\n"
             f"⏱️ 预计至少还要等: <code>{wait_text}</code>\n"
-            f"🚦 限速: <code>{notice.rate_limit_per_second}</code> 次/秒\n\n"
+            f"🚦 限速: <code>{notice.rate_limit_per_minute}</code> 次/分\n\n"
             f"{footer_tip}",
             parse_mode="HTML",
         )
