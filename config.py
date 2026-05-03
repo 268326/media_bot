@@ -100,7 +100,7 @@ BOT_USER_ID_SET = set(BOT_USER_IDS)
 
 # 自动解锁配置
 AUTO_UNLOCK_THRESHOLD = _parse_env_int("AUTO_UNLOCK_THRESHOLD", 0, minimum=0)  # 0=禁用自动解锁，>0=自动解锁的积分阈值
-HDHIVE_UNLOCK_RATE_LIMIT_PER_MINUTE = _parse_env_int("HDHIVE_UNLOCK_RATE_LIMIT_PER_MINUTE", 3, minimum=1)  # HDHive 解锁限速，默认 1 秒最多 3 次
+HDHIVE_UNLOCK_RATE_LIMIT_PER_MINUTE = _parse_env_int("HDHIVE_UNLOCK_RATE_LIMIT_PER_MINUTE", 3, minimum=1)  # HDHive 解锁限速，默认 1 分最多 3 次
 
 # 自动签到配置
 CHECKIN_CRON = os.getenv("CHECKIN_CRON", "").strip()  # 5段cron表达式，留空则禁用
