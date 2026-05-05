@@ -190,9 +190,9 @@ def infer_lang_raw_from_subtitle_name(name: str, fallback: str) -> str:
                 return lang_raw
 
         short = len(s) <= 20
-        if short and any(p in s for p in ["简中", "简体", "chs", "gb", "gbk", "gb2312", "zhhans", "zhcn", "zhchs", "简"]):
+        if short and any(p in s for p in ["简中", "简体", "chs", "sc", "gb", "gbk", "gb2312", "zhhans", "zhcn", "zhchs", "简"]):
             return "chs"
-        if short and any(p in s for p in ["繁中", "繁體", "繁体", "cht", "big5", "zhhant", "zhtw", "zhhk", "繁"]):
+        if short and any(p in s for p in ["繁中", "繁體", "繁体", "cht", "tc", "big5", "zhhant", "zhtw", "zhhk", "繁"]):
             return "cht"
         if short and any(p in s for p in ["日文", "日语", "jpn", "japanese", "jap", "ja", "jp", "日"]):
             return "jpn"
