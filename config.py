@@ -76,11 +76,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # HDHive Open API
 HDHIVE_API_KEY = os.getenv("HDHIVE_API_KEY", "").strip()
-HDHIVE_BASE_URL = os.getenv("HDHIVE_BASE_URL", "https://hdhive.com").strip() or "https://hdhive.com"
-HDHIVE_OPEN_API_BASE_URL = (
-    os.getenv("HDHIVE_OPEN_API_BASE_URL", f"{HDHIVE_BASE_URL}/api/open").strip()
-    or f"{HDHIVE_BASE_URL}/api/open"
-)
+HDHIVE_ACCESS_TOKEN = os.getenv("HDHIVE_ACCESS_TOKEN", "").strip()
 
 # 是否解析收到的 HDHive 链接（直接发送链接时自动处理；/hdt /hdm 等命令不受影响）
 HDHIVE_PARSE_INCOMING_LINKS = os.getenv("HDHIVE_PARSE_INCOMING_LINKS", "1").strip().lower() in (
@@ -100,7 +96,6 @@ BOT_USER_ID_SET = set(BOT_USER_IDS)
 
 # 自动解锁配置
 AUTO_UNLOCK_THRESHOLD = _parse_env_int("AUTO_UNLOCK_THRESHOLD", 0, minimum=0)  # 0=禁用自动解锁，>0=自动解锁的积分阈值
-HDHIVE_UNLOCK_RATE_LIMIT_PER_MINUTE = _parse_env_int("HDHIVE_UNLOCK_RATE_LIMIT_PER_MINUTE", 3, minimum=1)  # HDHive 解锁限速，默认 1 分最多 3 次
 
 # 自动签到配置
 CHECKIN_CRON = os.getenv("CHECKIN_CRON", "").strip()  # 5段cron表达式，留空则禁用
@@ -134,8 +129,8 @@ SA_AUTO_ADD_DELAY = _parse_env_int("SA_AUTO_ADD_DELAY", 60, minimum=0)
 SA_ENABLE_115_PUSH = os.getenv("SA_ENABLE_115_PUSH", "1").strip().lower() in ("1", "true", "yes", "on")
 SA_TOKEN = os.getenv("SA_TOKEN", "symedia").strip() or "symedia"
 
-# 日志文件路径（兼容旧变量 HDHIVE_LOG_PATH）
-_raw_log_path = os.getenv("MEDIA_BOT_LOG_PATH", os.getenv("HDHIVE_LOG_PATH", "media_bot.log"))
+# 日志文件路径
+_raw_log_path = os.getenv("MEDIA_BOT_LOG_PATH", "media_bot.log")
 if str(_raw_log_path).strip() in ("", "0", "false", "False", "none", "None"):
     LOG_PATH = "media_bot.log"
 else:
@@ -222,10 +217,14 @@ def validate_config():
     
     if not TMDB_API_KEY:
         warnings.append("未配置 TMDB_API_KEY，/hdt 和 /hdm 关键词搜索不可用，但直链解析仍可使用。")
-    
+
+    if HDHIVE_ACCESS_TOKEN:
+        warnings.append("已配置 HDHIVE_ACCESS_TOKEN：优先按官方文档以 Bearer 用户令牌访问需要用户身份的接口。")
+    else:
+        warnings.append("未配置 HDHIVE_ACCESS_TOKEN：当前将依赖个人 API Key / 绑定用户回退身份访问需要用户身份的接口。")
+
     if AUTO_UNLOCK_THRESHOLD > 0:
         warnings.append(f"已启用自动解锁: {AUTO_UNLOCK_THRESHOLD} 积分及以下的资源将自动解锁。")
-    warnings.append(f"HDHive 解锁限速: {HDHIVE_UNLOCK_RATE_LIMIT_PER_MINUTE} 次/分")
 
     if CHECKIN_CRON:
         warnings.append(

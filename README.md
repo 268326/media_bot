@@ -8,7 +8,9 @@
 - `/hdm` 搜索电影资源
 - 直接发送 HDHive 链接自动解析（可通过 `HDHIVE_PARSE_INCOMING_LINKS` 开关控制）
 - 积分解锁（支持阈值自动解锁）
-- HDHive 解锁请求统一走队列排队，并支持每分限速
+- 底层 HDHive 访问已切换为官方 Python SDK（vendored `hdhive_openapi.py`）+ `hdhive_openapi_adapter.py` / `hdhive_openapi_api.py` / `hdhive_openapi_unlock_service.py` 官方 OpenAPI 适配栈
+- 支持按官方文档附加 `Authorization: Bearer <HDHIVE_ACCESS_TOKEN>` 用户令牌；未配置时依赖个人 API Key / 绑定用户回退身份
+- 解锁不再使用任何本地固定限速，完全以官方 `429` / `Retry-After` 退避为准
 - `/points` 查询积分
 - `/checkin` 手动每日签到
 - `CHECKIN_CRON` 定时自动签到
@@ -34,9 +36,9 @@
 
 常用可选：
 
+- `HDHIVE_ACCESS_TOKEN`：可选但生产推荐；严格按官方文档作为 `Authorization: Bearer <token>` 调用需要用户身份的业务接口。留空时依赖个人 API Key / 绑定用户身份回退。
 - `bot_user_id`：可使用 Telegram 机器人的用户 ID 清单，多个用户用 `,` 分隔；留空则所有用户都能使用
 - `AUTO_UNLOCK_THRESHOLD`
-- `HDHIVE_UNLOCK_RATE_LIMIT_PER_MINUTE`：HDHive 解锁队列限速，默认每分 `3` 次
 - `HDHIVE_PARSE_INCOMING_LINKS`：是否自动解析聊天中直接收到的 HDHive 链接（默认开启）
 - `CHECKIN_CRON`：5 段 cron，留空禁用自动签到
 - `CHECKIN_TIMEZONE`：默认 `Asia/Shanghai`
@@ -99,6 +101,7 @@
 
 说明：
 
+- HDHive 站点地址固定为官方 SDK 文档中的 `https://hdhive.com`，OpenAPI 路径固定为 `/api/open`，不再通过环境变量自定义。
 - 关键词搜索依赖 TMDB API，因此 `/hdt` 和 `/hdm` 建议同时配置 `TMDB_API_KEY`
 - `/points`、`/checkin` 和自动签到依赖 HDHive Premium 权限对应的 Open API
 - `MEDIA_BOT_DEBUG=true` 时会输出 DEBUG 日志，便于排查问题

@@ -48,8 +48,7 @@
 3. 创建 `Bot` 和 `Dispatcher`
 4. 启动以下后台组件：
    - `strm_notifier`
-   - `hdhive_unlock_service`
-   - `session_manager`（兼容空实现）
+   - `hdhive_openapi_unlock_service`
    - `checkin_scheduler`
    - `strm_service`
 5. 启动心跳健康检查写入
@@ -96,17 +95,17 @@ main.py
 │   ├── formatter.py              # Telegram 文案和按钮构建
 │   ├── utils.py                  # 链接解析 / 网盘识别
 │   ├── tmdb_api.py               # TMDB 搜索与详情
-│   ├── hdhive_client.py          # HDHive facade
-│   │   └── hdhive_http_api.py    # HDHive Open API 真正实现
-│   │       ├── hdhive_auth.py    # API 认证与请求包装
-│   │       └── hdhive_unlock_service.py # 解锁/提取统一排队限速
+│   ├── hdhive_openapi_client.py          # HDHive official OpenAPI facade
+│   │   └── hdhive_openapi_api.py         # Bot 业务适配：资源归一化 / 积分 / 提链
+│   │       ├── hdhive_openapi_adapter.py # 官方 Python SDK 适配层：认证、重试、错误对象、扩展端点
+│   │       ├── hdhive_openapi.py         # vendored 官方最小 Python SDK
+│   │       └── hdhive_openapi_unlock_service.py # 官方 unlock 串行队列服务
 │   ├── checkin_service.py        # 手动签到
 │   ├── ass_service.py            # /ass 菜单服务门面
 │   ├── danmu_service.py          # /danmu
 │   ├── strm_service.py           # STRM watcher 服务门面
 │   └── strm_prune_service.py     # /rm_strm 服务门面
 ├── checkin_scheduler.py          # 自动签到 cron
-├── session_manager.py            # HTTP-only 兼容空实现
 ├── ass_*.py                      # ASS 子集化/内封流水线
 └── strm_*.py                     # STRM 监控 / 状态 / 命名 / 通知 / 清理
 ```
@@ -126,30 +125,31 @@ ass_mux_config.py + ass_mux_planner.py + ass_mux_pipeline.py + ass_formatter.py 
 ## 4. 先记住这些“非直觉事实”
 
 ### 4.1 HDHive 关键词搜索并不在 HDHive 内实现
-- `hdhive_http_api.search_resources()` 当前仍直接返回空列表。
-- 原因：**HDHive Open API 没有关键词搜索接口**。
+- `hdhive_openapi_api.search_resources()` 当前仍直接返回空列表。
+- 原因：**HDHive OpenAPI 官方文档没有关键词搜索接口**。
+- 底层 HDHive 访问已经切换为官方 Python SDK（`hdhive_openapi.py`）+ `hdhive_openapi_adapter.py` 生产适配层；不要再新增自写裸 HTTP 客户端。
 - 所以 `/hdt`、`/hdm` 真实流程是：
   1. `tmdb_api.search_tmdb()` 搜 TMDB
   2. 用户选候选项
   3. 再用 `get_resources_by_tmdb_id()` 去 HDHive 拉资源列表
 
-> 结论：优化搜索体验先看 `tmdb_api.py + handlers.py`，不是补 `hdhive_http_api.search_resources()`。
+> 结论：优化搜索体验先看 `tmdb_api.py + handlers.py`，不是补 `hdhive_openapi_api.search_resources()`。
 
-### 4.2 “免费 / 已解锁资源”最终仍走解锁队列统一提链
-- `fetch_download_link()` 不一定直接返回最终网盘链接。
-- 它主要负责前置检查、判断是否需要解锁、回传网站类型等元信息。
-- 最终链接提取仍统一走：
+### 4.2 “免费 / 已解锁资源”最终仍走官方 unlock 流程统一提链
+- `fetch_download_link()` 只负责用 `GET /api/open/shares/:slug` 做前置检查。
+- 只要进入实际提链阶段，最终仍统一调用：
   - `unlock_resource()`
   - `unlock_and_fetch()`
-  - 即 `hdhive_unlock_service.py` 的队列 + 速率限制链路
+  - 即 `POST /api/open/resources/unlock`
+- 不再引入任何本地固定限速策略；官方限制完全以 `429` / `Retry-After` 为准。
 
-> 结论：优化提链速度、排队、限速提示，优先看 `hdhive_unlock_service.py` 和 `handlers.py`。
+> 结论：优化提链速度、排队展示、失败处理，优先看 `hdhive_openapi_unlock_service.py` 和 `handlers.py`。
 
-### 4.3 `session_manager.py` 现在只是兼容空实现
-- 保留旧接口：`start/stop/close_session/get_session_count`
-- 但**不再维护任何真实浏览器会话**
+### 4.3 `session_manager.py` 已删除
+- 这个历史文件曾用于旧版会话层，但当前 HDHive 已完全切换为官方 OpenAPI 流程，不再需要它。
+- 不要再恢复任何浏览器会话、session_id 或 keep_session 逻辑。
 
-> 结论：不要再把新状态逻辑塞进这里，除非要真正重建会话层。
+> 结论：HDHive 相关改动不要再依赖或恢复该文件。
 
 ### 4.4 `config.py` 有导入副作用
 - 导入时会：
@@ -312,7 +312,6 @@ ass_mux_config.py + ass_mux_planner.py + ass_mux_pipeline.py + ass_formatter.py 
 |---|---|---|
 | `main.py` | 进程入口、日志初始化、心跳健康检查、后台服务启动/停止 | 改启动顺序、加新后台服务、调全局日志、改健康检查 |
 | `config.py` | 全局环境变量读取、静态配置、配置校验 | 新增全局配置、改校验规则、改默认值 |
-| `session_manager.py` | 旧接口兼容层，当前是空实现 | 仅在真的要恢复会话层时修改 |
 | `utils.py` | HDHive 链接解析、网盘识别、少量通用工具 | 改链接识别规则、网盘识别、提取码逻辑 |
 | `formatter.py` | 普通资源列表 / 错误 / 按钮文案 | 改 `/hdt` `/hdm` 等普通 UI |
 
@@ -427,7 +426,7 @@ ass_mux_config.py + ass_mux_planner.py + ass_mux_pipeline.py + ass_formatter.py 
 | 改内封执行/并发/替换策略 | `ass_mux_pipeline.py`, `ass_mux_config.py` | `ass_font_pool.py` |
 | 改内封执行中文案/进度 | `ass_formatter.py`, `handlers.py`, `ass_mux_pipeline.py` | `ass_pipeline.py` |
 | 改资源搜索交互 | `handlers.py`, `tmdb_api.py`, `formatter.py` | `strm_*`, `ass_*` |
-| 改资源提取/解锁 | `handlers.py`, `hdhive_http_api.py`, `hdhive_unlock_service.py` | `checkin_*` |
+| 改资源提取/解锁 | `handlers.py`, `hdhive_openapi_api.py`, `hdhive_openapi_adapter.py`, `hdhive_openapi_unlock_service.py` | `checkin_*` |
 | 改 STRM 通知/状态机 | `strm_notifier.py`, `strm_watcher.py`, `strm_batch_state.py` | `ass_*` |
 | 改 `/rm_strm` | `handlers.py`, `strm_prune_service.py`, `strm_prune.py`, `strm_prune_emby.py` | `ass_*` |
 | 改健康检查/启动 | `main.py`, `docker-compose.yml` | `ass_*`, `strm_naming.py` |

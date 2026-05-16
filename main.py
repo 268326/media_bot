@@ -29,7 +29,7 @@ def _resolve_dotenv_path() -> str:
 DOTENV_PATH = _resolve_dotenv_path()
 load_dotenv(dotenv_path=DOTENV_PATH, override=True)
 
-LOG_PATH = os.getenv("MEDIA_BOT_LOG_PATH", os.getenv("HDHIVE_LOG_PATH", "media_bot.log"))
+LOG_PATH = os.getenv("MEDIA_BOT_LOG_PATH", "media_bot.log")
 if str(LOG_PATH).strip() in ("", "0", "false", "False", "none", "None"):
     LOG_PATH = "media_bot.log"
 LOG_TO_FILE = os.getenv("MEDIA_BOT_LOG_TO_FILE", "0").strip().lower() in ("1", "true", "yes", "on")
@@ -67,12 +67,10 @@ from emby_task_service import emby_task_service
 # 导入处理器路由器
 from handlers import router
 
-# 导入会话管理器
-from session_manager import session_manager
 from checkin_scheduler import checkin_scheduler
 from strm_service import strm_service
 from strm_notifier import strm_notifier
-from hdhive_unlock_service import hdhive_unlock_service
+from hdhive_openapi_unlock_service import hdhive_openapi_unlock_service
 
 
 def health_snapshot() -> dict[str, object]:
@@ -81,8 +79,8 @@ def health_snapshot() -> dict[str, object]:
         "strm_enabled": bool(strm_service.settings.enabled),
         "strm_started": bool(strm_service.started),
         "strm_running": bool(strm_service.status().get("running")),
-        "unlock_queue_started": bool(hdhive_unlock_service.started),
-        "unlock_queue_workers": len(hdhive_unlock_service.worker_tasks),
+        "unlock_queue_started": bool(hdhive_openapi_unlock_service.started),
+        "unlock_queue_workers": len(hdhive_openapi_unlock_service.worker_tasks),
         "checkin_enabled": bool(checkin_scheduler.enabled),
         "checkin_scheduler_started": bool(checkin_scheduler.scheduler is not None),
         "emby_tasks_enabled": bool(emby_task_service.settings.enabled),
@@ -140,12 +138,9 @@ async def main():
     heartbeat_task = asyncio.create_task(health_heartbeat(heartbeat_stop))
     write_health_snapshot(health_snapshot())
 
-    # 启动 HDHive 解锁队列服务
-    await hdhive_unlock_service.start()
+    # 启动 HDHive 官方 OpenAPI 解锁队列服务
+    await hdhive_openapi_unlock_service.start()
 
-    # 启动会话管理器
-    await session_manager.start()
-    logging.info("✅ 会话管理器已启动")
     await checkin_scheduler.start(bot)
     await strm_service.start()
     await emby_task_service.start(bot)
@@ -177,12 +172,8 @@ async def main():
         # 停止 STRM 通知器
         await strm_notifier.stop()
 
-        # 停止 HDHive 解锁队列服务
-        await hdhive_unlock_service.stop()
-
-        # 停止会话管理器
-        await session_manager.stop()
-        logging.info("✅ 会话管理器已停止")
+        # 停止 HDHive 官方 OpenAPI 解锁队列服务
+        await hdhive_openapi_unlock_service.stop()
 
 
 if __name__ == "__main__":

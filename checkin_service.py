@@ -1,12 +1,12 @@
 """
-每日签到服务模块（HDHive Open API 版）
+每日签到服务模块（基于官方 HDHive Python SDK 适配层）
 """
 from __future__ import annotations
 
 import asyncio
 
 from config import CHECKIN_GAMBLE
-from hdhive_auth import OpenAPIError, build_authenticated_session, request_open_api_json
+from hdhive_openapi_adapter import OpenAPIError, build_authenticated_client_context
 
 
 def _extract_points(payload: dict) -> int | None:
@@ -24,27 +24,22 @@ def _extract_points(payload: dict) -> int | None:
     return None
 
 
-def _read_points(session) -> int | None:
-    payload = request_open_api_json(session, "GET", "/me")
+def _read_points(client) -> int | None:
+    payload = client.get_me()
     return _extract_points(payload)
 
 
 def _daily_check_in_sync() -> dict:
-    with build_authenticated_session() as session:
+    with build_authenticated_client_context() as client:
         before_points = None
         after_points = None
 
         try:
-            before_points = _read_points(session)
+            before_points = _read_points(client)
         except OpenAPIError:
             before_points = None
 
-        payload = request_open_api_json(
-            session,
-            "POST",
-            "/checkin",
-            json={"is_gambler": bool(CHECKIN_GAMBLE)},
-        )
+        payload = client.checkin(is_gambler=bool(CHECKIN_GAMBLE))
 
         data = payload.get("data") or {}
         message = str(
@@ -55,7 +50,7 @@ def _daily_check_in_sync() -> dict:
         checked_in = bool(data.get("checked_in")) if isinstance(data, dict) else False
 
         try:
-            after_points = _read_points(session)
+            after_points = _read_points(client)
         except OpenAPIError:
             after_points = None
 

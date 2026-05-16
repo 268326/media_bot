@@ -3,13 +3,11 @@ Telegram 处理器模块
 处理所有命令和回调查询
 """
 import logging
-import re
 import asyncio
-import aiohttp
+import contextlib
 import html
 import os
 import time
-import contextlib
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import (
@@ -23,14 +21,7 @@ from aiogram.types import (
 from config import (
     BOT_USER_IDS,
     BOT_USER_ID_SET,
-    SA_URL,
-    SA_PARENT_ID,
-    SA_AUTO_ADD_DELAY,
-    SA_TOKEN,
-    SA_ENABLE_115_PUSH,
-    AUTO_UNLOCK_THRESHOLD,
     LOG_PATH,
-    HDHIVE_PARSE_INCOMING_LINKS,
 )
 from ass_formatter import (
     format_mux_running,
@@ -45,21 +36,9 @@ from ass_service import (
 )
 from danmu_service import fetch_bilibili_danmaku_xml, DanmuError
 from checkin_service import daily_check_in
-from utils import parse_hdhive_link, detect_share_provider, is_115_share_link, detect_provider_by_website
-from hdhive_client import (
-    get_resources_by_tmdb_id,
-    fetch_download_link, 
-    unlock_resource,
-    unlock_and_fetch,
-    get_user_points
-)
-from hdhive_unlock_service import UnlockQueueNotice
-from session_manager import session_manager
-from tmdb_api import search_tmdb, get_tmdb_details
+from hdhive_openapi_client import get_user_points
+from hdhive_openapi_flow import hdhive_openapi_flow_service
 from formatter import (
-    format_resource_list,
-    format_unlock_confirmation,
-    format_tmdb_info,
     format_points_message,
     format_error_message,
     format_help_message,
@@ -80,82 +59,13 @@ from strm_prune_service import strm_prune_service
 # 创建路由器
 router = Router()
 
-# 待添加到SA的任务字典 {"chat_id:message_id": {"link": str, "task": asyncio.Task, "cancelled": bool, "user_id": int|None, "created_at": float}}
-pending_sa_tasks: dict[str, dict] = {}
 # 待确认的 STRM 清理任务 {"chat_id:message_id": {"user_id": int, "created_at": float, "preview_text": str}}
 rm_strm_pending_confirms: dict[str, dict] = {}
 RM_STRM_CONFIRM_TTL = 900
-RESOURCE_WEBSITE_CACHE_LIMIT = 2048
-RESOURCE_LIST_STATE_LIMIT = 256
-TMDB_SEARCH_STATE_LIMIT = 256
-# 资源网盘类型缓存：resource_id -> website
-resource_website_cache: dict[str, str] = {}
-# 资源列表状态缓存："chat_id:message_id" -> {"resources": list, "media_type": str, "title": str|None}
-resource_list_state: dict[str, dict] = {}
-# TMDB 候选列表状态缓存："chat_id:message_id" -> {"results": list[dict], "page": int}
-tmdb_search_state: dict[str, dict] = {}
 
 # Emby 任务列表状态缓存："chat_id:message_id" -> {"tasks": list[dict], "page": int, "owner_user_id": int}
 emby_task_state: dict[str, dict] = {}
 EMBY_TASK_STATE_LIMIT = 128
-
-TMDB_PAGE_SIZE = 5
-SA_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10, sock_read=30)
-SA_HTTP_HEADERS = {"Accept": "application/json", "User-Agent": "MediaBot/1.0"}
-
-
-def build_tmdb_candidate_message(results: list[dict], page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
-    """构建 TMDB 候选项分页消息。"""
-    total = len(results)
-    total_pages = max(1, (total + TMDB_PAGE_SIZE - 1) // TMDB_PAGE_SIZE)
-    current_page = min(max(page, 0), total_pages - 1)
-    start = current_page * TMDB_PAGE_SIZE
-    page_items = results[start:start + TMDB_PAGE_SIZE]
-
-    result_text = f"🔍 <b>找到 {total} 个匹配结果</b>\n"
-    result_text += f"第 <code>{current_page + 1}</code>/<code>{total_pages}</code> 页\n"
-    result_text += "─────────────────\n"
-    result_text += "请选择你要的是哪一个:\n"
-
-    button_row: list[InlineKeyboardButton] = []
-    for idx, item in enumerate(page_items, 1):
-        overview = item.get("overview", "暂无简介")
-        if len(overview) > 100:
-            overview = overview[:100] + "…"
-
-        display_index = start + idx
-        result_text += "\n<blockquote>\n"
-        result_text += f"<b>{display_index}. {item['title']}</b>\n"
-        result_text += f"📅 {item.get('release_date', '未知')}"
-        if item.get("rating"):
-            result_text += f" · ⭐️ {item['rating']:.1f}\n"
-        else:
-            result_text += "\n"
-        result_text += f"{overview}\n"
-        result_text += "</blockquote>"
-
-        button_row.append(
-            InlineKeyboardButton(
-                text=f"{idx}",
-                callback_data=f"select_tmdb:{start + idx - 1}",
-            )
-        )
-
-    inline_keyboard: list[list[InlineKeyboardButton]] = []
-    if button_row:
-        inline_keyboard.append(button_row)
-
-    nav_row: list[InlineKeyboardButton] = []
-    if current_page > 0:
-        nav_row.append(InlineKeyboardButton(text="⬅️ 上一页", callback_data=f"tmdb_page:{current_page - 1}"))
-    nav_row.append(InlineKeyboardButton(text=f"{current_page + 1}/{total_pages}", callback_data="tmdb_page:noop"))
-    if current_page < total_pages - 1:
-        nav_row.append(InlineKeyboardButton(text="下一页 ➡️", callback_data=f"tmdb_page:{current_page + 1}"))
-    inline_keyboard.append(nav_row)
-
-    result_text += "\n─────────────────\n"
-    result_text += "<b>点击数字选择</b>"
-    return result_text, InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
 
 
 def trim_dict_cache(cache: dict, limit: int) -> None:
@@ -165,13 +75,56 @@ def trim_dict_cache(cache: dict, limit: int) -> None:
 
 
 def make_message_state_key(message: Message | None) -> str | None:
-    if not message:
-        return None
-    chat = getattr(message, "chat", None)
-    if not chat:
-        return None
-    return f"{chat.id}:{message.message_id}"
+    return hdhive_openapi_flow_service.make_message_state_key(message)
 
+
+async def sync_ass_mux_view(bot, chat_id: int, owner_user_id: int):
+    session = ass_service.get_mux_session(chat_id, owner_user_id)
+    if not session:
+        return
+
+    panel_text = await ass_service.build_mux_panel_text(chat_id, owner_user_id)
+    panel_kb = ass_service.build_mux_plan_keyboard(chat_id, owner_user_id)
+    panel_message_id = session.awaiting_message_id
+    if panel_message_id:
+        try:
+            await bot.edit_message_text(
+                panel_text,
+                chat_id=chat_id,
+                message_id=panel_message_id,
+                reply_markup=panel_kb,
+                parse_mode="HTML",
+            )
+        except Exception as exc:
+            logging.debug("更新 /ass 主面板失败: %s", exc)
+
+
+async def pump_ass_mux_progress(bot, chat_id: int, message_id: int, session, progress_queue: asyncio.Queue[MuxProgressEvent | None]):
+    last_processed = 0
+    last_total = sum(1 for item in session.plan.items if getattr(item, 'subs', None)) if session.plan else 0
+    while True:
+        event = await progress_queue.get()
+        if event is None:
+            return
+        last_processed = max(0, int(event.processed))
+        last_total = max(last_processed, int(event.total))
+        current_file = html.escape(event.current_file or "")
+        text = format_mux_running(
+            processed=last_processed,
+            total=last_total,
+            dry_run=bool(session.dry_run),
+        )
+        if current_file:
+            text += f"\n📝 当前完成: <code>{current_file}</code>"
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                parse_mode="HTML",
+            )
+        except Exception as exc:
+            logging.debug("更新 /ass 字幕内封进度消息失败: %s", exc)
 
 
 
@@ -182,7 +135,6 @@ def _build_emby_task_state(tasks: list[dict], *, page: int, owner_user_id: int, 
         "owner_user_id": owner_user_id,
         "filter_mode": filter_mode,
     }
-
 
 
 PRO_QUICK_TASK_NAMES = [
@@ -213,8 +165,6 @@ def _parse_emby_task_callback_value(raw: str) -> tuple[int, str]:
     return page, task_id
 
 
-
-
 def _build_pro_quick_actions(tasks: list[dict], filter_mode: str) -> list[tuple[str, str]]:
     if filter_mode != "pro":
         return []
@@ -228,329 +178,6 @@ def _build_pro_quick_actions(tasks: list[dict], filter_mode: str) -> list[tuple[
             task_label = task_label[:9] + "…"
         actions.append((task_label, str(task.get("id") or "")))
     return actions
-
-
-def format_duration_compact(seconds: float | int | None) -> str:
-    total_seconds = max(0, int(float(seconds or 0)))
-    minutes, secs = divmod(total_seconds, 60)
-    hours, mins = divmod(minutes, 60)
-    if hours > 0:
-        return f"{hours}h {mins}m {secs}s"
-    if mins > 0:
-        return f"{mins}m {secs}s"
-    return f"{secs}s"
-
-
-async def notify_auto_unlock_failed(target_msg: Message, fallback_msg: Message):
-    """通知自动解锁失败（必要时回退发送新消息）"""
-    try:
-        await target_msg.edit_text("❌ 自动解锁失败，请稍后重试", parse_mode="HTML")
-    except Exception:
-        await fallback_msg.reply("❌ 自动解锁失败，请稍后重试", parse_mode="HTML")
-
-
-async def update_unlock_queue_notice(
-    wait_msg: Message,
-    notice: UnlockQueueNotice,
-    *,
-    auto_unlock: bool,
-    title: str | None = None,
-    tip: str | None = None,
-):
-    """在 Telegram 消息中展示解锁排队/限速等待状态。"""
-    mode_text = title or ("自动解锁排队中" if auto_unlock else "解锁排队中")
-    footer_tip = tip or "💡 已触发 HDHive API 解锁限速，正在排队等待"
-    ahead_text = (
-        f"前面还有 <code>{notice.ahead_count}</code> 个请求"
-        if notice.ahead_count > 0
-        else "你已在队列最前面，等待下一个可用速率窗口"
-    )
-    queued_text = format_duration_compact(notice.queued_seconds)
-    wait_text = format_duration_compact(notice.wait_seconds)
-    try:
-        await wait_msg.edit_text(
-            f"⏳ <b>{mode_text}...</b>\n\n"
-            f"🆔 <code>{notice.resource_id}</code>\n"
-            f"📍 当前队列位置: <code>{notice.queue_position}</code>\n"
-            f"👥 {ahead_text}\n"
-            f"⌛ 已累计等待: <code>{queued_text}</code>\n"
-            f"⏱️ 预计至少还要等: <code>{wait_text}</code>\n"
-            f"🚦 限速: <code>{notice.rate_limit_per_minute}</code> 次/分\n\n"
-            f"{footer_tip}",
-            parse_mode="HTML",
-        )
-    except Exception as exc:
-        logging.debug("更新解锁排队提示失败: %s", exc)
-
-
-def build_unlock_wait_callback(
-    wait_msg: Message,
-    *,
-    auto_unlock: bool,
-    title: str | None = None,
-    tip: str | None = None,
-):
-    async def _wait_callback(notice: UnlockQueueNotice):
-        await update_unlock_queue_notice(
-            wait_msg,
-            notice,
-            auto_unlock=auto_unlock,
-            title=title,
-            tip=tip,
-        )
-
-    return _wait_callback
-
-
-async def perform_unlock_and_handle_result(
-    *,
-    wait_msg: Message,
-    fallback_msg: Message,
-    resource_id: str,
-    user_id: int,
-    auto_unlock: bool,
-    website: str,
-) -> bool:
-    """统一执行解锁并处理结果展示。"""
-    if auto_unlock:
-        await wait_msg.edit_text(
-            f"🤖 <b>自动解锁中...</b>\n\n"
-            f"🆔 <code>{resource_id}</code>\n"
-            f"💡 请求已提交到解锁队列",
-            parse_mode="HTML"
-        )
-    else:
-        await wait_msg.edit_text(
-            f"🔓 <b>正在解锁资源...</b>\n\n"
-            f"🆔 <code>{resource_id}</code>\n"
-            f"💡 请求已提交到解锁队列",
-            parse_mode="HTML"
-        )
-
-    wait_callback = build_unlock_wait_callback(
-        wait_msg,
-        auto_unlock=auto_unlock,
-    )
-
-    try:
-        result = await unlock_and_fetch(
-            resource_id,
-            user_id=user_id,
-            wait_callback=wait_callback,
-        )
-    except Exception as exc:
-        logging.error("❌ 解锁出错: %s", exc)
-        error_text = f"❌ {'自动' if auto_unlock else ''}解锁失败，请稍后重试"
-        try:
-            await wait_msg.edit_text(error_text, parse_mode="HTML")
-        except Exception:
-            await fallback_msg.reply(error_text, parse_mode="HTML")
-        return False
-
-    if result and result.get("link"):
-        await handle_link_extracted(
-            wait_msg,
-            result["link"],
-            result.get("code", "无"),
-            auto_unlock=auto_unlock,
-            website=result.get("website") or website,
-            requester_user_id=user_id,
-        )
-        return True
-
-    if auto_unlock:
-        await notify_auto_unlock_failed(wait_msg, fallback_msg)
-    else:
-        try:
-            await wait_msg.edit_text("❌ 解锁失败，请稍后重试", parse_mode="HTML")
-        except Exception:
-            await fallback_msg.reply("❌ 解锁失败，请稍后重试", parse_mode="HTML")
-    return False
-
-
-async def handle_unlock_required(
-    *,
-    wait_msg: Message,
-    fallback_msg: Message,
-    resource_id: str,
-    user_id: int,
-    result: dict,
-    website: str,
-) -> bool:
-    """统一处理需要解锁的资源。返回 True 表示流程已结束。"""
-    points = result["points"]
-
-    if AUTO_UNLOCK_THRESHOLD > 0 and points <= AUTO_UNLOCK_THRESHOLD:
-        logging.info(f"🤖 自动解锁: {points} 积分 <= {AUTO_UNLOCK_THRESHOLD} 积分阈值")
-        await perform_unlock_and_handle_result(
-            wait_msg=wait_msg,
-            fallback_msg=fallback_msg,
-            resource_id=resource_id,
-            user_id=user_id,
-            auto_unlock=True,
-            website=website,
-        )
-        return True
-
-    user_points = await get_user_points()
-
-    if user_points is not None and user_points < points:
-        session_id = result.get("session_id")
-        if session_id:
-            await session_manager.close_session(session_id)
-
-        await wait_msg.edit_text(
-            format_error_message(
-                'insufficient_points',
-                f"需要: <code>{points}</code> 积分\n"
-                f"当前: <code>{user_points}</code> 积分\n"
-                f"缺少: <code>{points - user_points}</code> 积分"
-            ),
-            parse_mode="HTML"
-        )
-        return True
-
-    text, kb = format_unlock_confirmation(resource_id, points, user_points)
-    await wait_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
-    return True
-
-
-async def fetch_download_link_and_handle_result(
-    *,
-    wait_msg: Message,
-    fallback_msg: Message,
-    resource_id: str,
-    user_id: int,
-    website: str,
-):
-    """统一处理无需确认的提取链路（免费/已解锁资源也走解锁队列）。"""
-    wait_callback = build_unlock_wait_callback(
-        wait_msg,
-        auto_unlock=False,
-        title="提取排队中",
-        tip="💡 HDHive 提取底层也会调用解锁接口，当前正在按限速队列等待",
-    )
-
-    try:
-        result = await unlock_resource(
-            resource_id,
-            user_id=user_id,
-            wait_callback=wait_callback,
-        )
-    except Exception as exc:
-        logging.error("❌ 提取链接出错: %s", exc)
-        await wait_msg.edit_text(
-            format_error_message('fetch_failed'),
-            parse_mode="HTML"
-        )
-        return False
-
-    link = str((result or {}).get("full_url") or (result or {}).get("url") or "").strip()
-    if not link:
-        await wait_msg.edit_text(
-            format_error_message('fetch_failed'),
-            parse_mode="HTML"
-        )
-        return False
-
-    await handle_link_extracted(
-        wait_msg,
-        link,
-        (result or {}).get("access_code") or "无",
-        auto_unlock=False,
-        website=website,
-        requester_user_id=user_id,
-    )
-    return True
-
-
-async def handle_link_extracted(
-    wait_msg: Message,
-    link: str,
-    code: str = "无",
-    auto_unlock: bool = False,
-    website: str | None = None,
-    requester_user_id: int | None = None,
-):
-    """
-    统一处理链接提取成功后的逻辑
-    
-    Args:
-        wait_msg: 等待消息对象
-        link: 115链接
-        code: 提取码
-        auto_unlock: 是否是自动解锁
-        requester_user_id: 触发本次提取的用户 ID
-    """
-    provider_key, provider_name = detect_provider_by_website(website)
-    if provider_key == "unknown":
-        provider_key, provider_name = detect_share_provider(link)
-    button_text = f"🔗 打开{provider_name}"
-
-    # 仅 115 链接支持自动添加到 SA
-    can_auto_add_sa = SA_URL and SA_PARENT_ID and SA_ENABLE_115_PUSH and provider_key == "115"
-
-    if can_auto_add_sa:
-        task_key = make_message_state_key(wait_msg)
-        if not task_key:
-            await wait_msg.edit_text("❌ 无法记录自动添加状态，请稍后重试", parse_mode="HTML")
-            return
-        # 显示网盘链接按钮
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=button_text, url=link)]
-        ])
-        
-        unlock_text = "🤖 自动解锁 · " if auto_unlock else ""
-        
-        # 更新消息
-        await wait_msg.edit_text(
-            f"✅ <b>{unlock_text}提取成功</b>\n\n"
-            f"<blockquote>\n"
-            f"🔗 <a href='{link}'>{provider_name}链接</a>\n"
-            f"🔑 提取码: <code>{code}</code>\n"
-            f"</blockquote>\n\n"
-            f"⏱️ 将在 {SA_AUTO_ADD_DELAY} 秒后自动添加到 Symedia\n"
-            f"💡 不需要的话发送 /hdc 取消（仅115支持自动添加）",
-            reply_markup=kb,
-            parse_mode="HTML",
-            disable_web_page_preview=True
-        )
-        
-        # 创建自动添加任务
-        task = asyncio.create_task(auto_add_to_sa(task_key, link, wait_msg, countdown=SA_AUTO_ADD_DELAY))
-        pending_sa_tasks[task_key] = {
-            "link": link,
-            "task": task,
-            "cancelled": False,
-            "user_id": requester_user_id,
-            "created_at": time.time(),
-        }
-        
-        logging.info(f"⏰ 已启动自动添加倒计时: {link}")
-    else:
-        # 非115或未配置SA：只显示链接，不自动添加
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=button_text, url=link)]
-        ])
-        
-        unlock_text = "🤖 自动解锁 · " if auto_unlock else ""
-        extra_tip = ""
-        if SA_URL and SA_PARENT_ID and provider_key != "115":
-            extra_tip = "\n\n💡 当前为非115链接，已跳过 Symedia 自动添加"
-        elif SA_URL and SA_PARENT_ID and provider_key == "115" and not SA_ENABLE_115_PUSH:
-            extra_tip = "\n\n💡 已关闭115自动推送到 Symedia（SA_ENABLE_115_PUSH=0）"
-        
-        await wait_msg.edit_text(
-            f"✅ <b>{unlock_text}提取成功</b>\n\n"
-            f"<blockquote>\n"
-            f"🔗 <a href='{link}'>{provider_name}链接</a>\n"
-            f"🔑 提取码: <code>{code}</code>\n"
-            f"</blockquote>"
-            f"{extra_tip}",
-            reply_markup=kb,
-            parse_mode="HTML",
-            disable_web_page_preview=True
-        )
 
 
 # ==================== 权限检查中间件 ====================
@@ -701,29 +328,31 @@ async def cmd_danmu(message: Message):
         )
         return
 
-    link = args[1].strip()
-    logging.info("🎬 /danmu 请求: user=%s link=%s", message.from_user.id, link)
-    wait_msg = await message.reply("⏳ 正在获取弹幕...", parse_mode="HTML")
+    url = args[1].strip()
+    wait_msg = await message.reply("⏳ 正在解析弹幕链接...", parse_mode="HTML")
 
     try:
-        result = await fetch_bilibili_danmaku_xml(link)
-    except DanmuError as e:
-        await wait_msg.edit_text(
-            f"❌ 获取弹幕失败\n\n{html.escape(str(e))}",
-            parse_mode="HTML"
-        )
+        filename, xml_bytes = await fetch_bilibili_danmaku_xml(url)
+    except DanmuError as exc:
+        await wait_msg.edit_text(f"❌ {html.escape(str(exc))}", parse_mode="HTML")
         return
-    except Exception as e:
-        logging.error(f"❌ 获取弹幕失败: {e}")
-        await wait_msg.edit_text("❌ 获取弹幕失败，请稍后重试", parse_mode="HTML")
+    except Exception as exc:
+        logging.exception("❌ 下载弹幕失败")
+        await wait_msg.edit_text(f"❌ 下载失败: {html.escape(str(exc))}", parse_mode="HTML")
         return
 
-    filename = f"{result.filename}.xml"
-    file = BufferedInputFile(result.content, filename=filename)
-    caption = f"✅ 弹幕已获取\n\n<code>{html.escape(filename)}</code>"
-    await message.reply_document(file, caption=caption, parse_mode="HTML")
-    await wait_msg.delete()
-    logging.info("✅ /danmu 完成: user=%s filename=%s cid=%s", message.from_user.id, filename, result.cid)
+    try:
+        await wait_msg.delete()
+    except Exception:
+        pass
+
+    await message.reply_document(
+        BufferedInputFile(xml_bytes, filename=filename),
+        caption=f"✅ 已生成弹幕 XML\n<code>{html.escape(filename)}</code>",
+        parse_mode="HTML"
+    )
+
+
 
 
 @router.message(Command("ass"))
@@ -735,151 +364,101 @@ async def cmd_ass(message: Message):
     await message.reply(text, reply_markup=kb, parse_mode="HTML")
 
 
-async def sync_ass_mux_view(bot, chat_id: int, user_id: int):
-    session = ass_service.get_mux_session(chat_id, user_id)
-    if not session:
-        return
-
-    panel_text = await ass_service.build_mux_panel_text(chat_id, user_id)
-    panel_kb = ass_service.build_mux_plan_keyboard(chat_id, user_id)
-
-    if session.awaiting_message_id:
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=session.awaiting_message_id,
-                text=panel_text,
-                reply_markup=panel_kb,
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
-
-
-async def pump_ass_mux_progress(bot, chat_id: int, message_id: int, session, progress_queue: asyncio.Queue[MuxProgressEvent | None]):
-    last_processed = 0
-    last_total = sum(1 for item in session.plan.items if getattr(item, 'subs', None)) if session.plan else 0
-    while True:
-        event = await progress_queue.get()
-        if event is None:
-            return
-        last_processed = max(0, int(event.processed))
-        last_total = max(last_processed, int(event.total))
-        current_file = html.escape(event.current_file or "")
-        text = format_mux_running(
-            processed=last_processed,
-            total=last_total,
-            dry_run=bool(session.dry_run),
-        )
-        if current_file:
-            text += f"\n📝 当前完成: <code>{current_file}</code>"
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=text,
-                parse_mode="HTML",
-            )
-        except Exception as exc:
-            logging.debug("更新 /ass 字幕内封进度消息失败: %s", exc)
-
-
-
-
 @router.message(Command("emby_tasks"))
 async def cmd_emby_tasks(message: Message):
+    """打开 Emby 计划任务面板"""
     if not await check_user_permission(message):
         return
 
-    wait_msg = await message.reply("🧩 正在读取 Emby 计划任务…", parse_mode="HTML")
-    result = await emby_task_service.list_tasks()
-    if not result.get("ok"):
-        await wait_msg.edit_text(f"❌ {html.escape(str(result.get('message') or '未知错误'))}", parse_mode="HTML")
+    wait_msg = await message.reply("⏳ 正在获取 Emby 任务列表...", parse_mode="HTML")
+    try:
+        tasks = await emby_task_service.list_tasks()
+    except Exception as exc:
+        logging.exception("❌ 获取 Emby 任务列表失败")
+        await wait_msg.edit_text(f"❌ 获取 Emby 任务列表失败\n\n<code>{html.escape(str(exc))}</code>", parse_mode="HTML")
         return
 
-    tasks = result.get("tasks") or []
-    page = 0
     filter_mode = "pro"
-    quick_actions: list[tuple[str, str]] = _build_pro_quick_actions(tasks, filter_mode)
-
+    filtered_tasks = filter_tasks_for_view(tasks, filter_mode)
+    summary = build_category_summary(tasks)
+    header_note = describe_filter_mode(filter_mode)
     panel_text, kb = build_tasks_panel(
-        tasks,
-        page=page,
-        notify_enabled=bool(emby_task_service.notify_enabled),
-        status=result.get("status"),
+        filtered_tasks,
+        page=0,
+        summary=summary,
+        notify_enabled=emby_task_service.notify_enabled,
         filter_mode=filter_mode,
-        quick_actions=quick_actions,
+        header_note=header_note,
+        quick_actions=_build_pro_quick_actions(tasks, filter_mode),
     )
+    await wait_msg.edit_text(panel_text, reply_markup=kb, parse_mode="HTML")
     state_key = make_message_state_key(wait_msg)
     if state_key:
         emby_task_state[state_key] = _build_emby_task_state(
             tasks,
-            page=page,
+            page=0,
             owner_user_id=message.from_user.id,
             filter_mode=filter_mode,
         )
         trim_dict_cache(emby_task_state, EMBY_TASK_STATE_LIMIT)
-    await wait_msg.edit_text(panel_text, reply_markup=kb, parse_mode="HTML")
 
 
 @router.message(Command("strm_status"))
 async def cmd_strm_status(message: Message):
+    """查看 STRM 监控服务状态。"""
     if not await check_user_permission(message):
         return
 
-    st = strm_service.status()
-    text = (
-        "🧩 <b>STRM 监控状态</b>\n\n"
-        f"启用: <code>{st['enabled']}</code>\n"
-        f"已启动: <code>{st['started']}</code>\n"
-        f"运行中: <code>{st['running']}</code>\n"
-        f"WATCH_DIR: <code>{st['watch_dir'] or '-'}</code>\n"
-        f"DONE_DIR: <code>{st['done_dir'] or '-'}</code>\n"
-        f"FAILED_DIR: <code>{st['failed_dir'] or '-'}</code>\n"
-        f"LAST_ERROR: <code>{st['last_error'] or '-'}</code>"
-    )
+    status = strm_service.status()
+    text = strm_service.build_status_text(status)
     await message.reply(text, parse_mode="HTML")
+
 
 @router.message(Command("strm_scan"))
 async def cmd_strm_scan(message: Message):
+    """手动触发一次 STRM 全量扫描。"""
     if not await check_user_permission(message):
         return
 
-    wait_msg = await message.reply("🔄 正在触发 STRM 手动重扫…", parse_mode="HTML")
-    result = await strm_service.scan()
-    prefix = "✅" if result.get("ok") else "❌"
-    await wait_msg.edit_text(f"{prefix} {result.get('message', '未知结果')}", parse_mode="HTML")
+    wait_msg = await message.reply("⏳ 正在触发 STRM 重扫...", parse_mode="HTML")
+    try:
+        result = await strm_service.scan_once()
+        text = strm_service.build_scan_result_text(result)
+        await wait_msg.edit_text(text, parse_mode="HTML")
+    except Exception as exc:
+        logging.exception("❌ 手动 STRM 重扫失败")
+        await wait_msg.edit_text(f"❌ STRM 重扫失败\n\n<code>{html.escape(str(exc))}</code>", parse_mode="HTML")
 
 
 @router.message(Command("strm_restart"))
 async def cmd_strm_restart(message: Message):
+    """手动重启 STRM watcher。"""
     if not await check_user_permission(message):
         return
 
-    wait_msg = await message.reply("♻️ 正在重启 STRM watcher…", parse_mode="HTML")
-    result = await strm_service.restart()
-    prefix = "✅" if result.get("ok") else "❌"
-    await wait_msg.edit_text(f"{prefix} {result.get('message', '未知结果')}", parse_mode="HTML")
+    wait_msg = await message.reply("⏳ 正在重启 STRM watcher...", parse_mode="HTML")
+    try:
+        await strm_service.restart()
+        status = strm_service.status()
+        text = "✅ STRM watcher 已重启\n\n" + strm_service.build_status_text(status)
+        await wait_msg.edit_text(text, parse_mode="HTML")
+    except Exception as exc:
+        logging.exception("❌ 重启 STRM watcher 失败")
+        await wait_msg.edit_text(f"❌ 重启 STRM watcher 失败\n\n<code>{html.escape(str(exc))}</code>", parse_mode="HTML")
 
 
 @router.message(Command("rm_strm"))
 async def cmd_rm_strm(message: Message):
+    """预览 STRM 空目录清理，并通过按钮确认实际删除。"""
     if not await check_user_permission(message):
         return
 
-    now = time.time()
-    expired_keys = [
-        msg_id
-        for msg_id, payload in rm_strm_pending_confirms.items()
-        if now - float(payload.get("created_at") or 0) > RM_STRM_CONFIRM_TTL
-    ]
-    for msg_id in expired_keys:
-        rm_strm_pending_confirms.pop(msg_id, None)
-
-    wait_msg = await message.reply("🧹 正在预览 STRM 空目录清理结果…", parse_mode="HTML")
-    result = await strm_prune_service.run(apply_changes=False)
-    if not result.get("ok"):
-        await wait_msg.edit_text(f"❌ {result.get('message', '未知结果')}", parse_mode="HTML")
+    wait_msg = await message.reply("⏳ 正在扫描可删除的 STRM 空目录...", parse_mode="HTML")
+    try:
+        result = await strm_prune_service.preview(message.from_user.id)
+    except Exception as exc:
+        logging.exception("❌ 预览 STRM 空目录清理失败")
+        await wait_msg.edit_text(f"❌ 预览失败\n\n<code>{html.escape(str(exc))}</code>", parse_mode="HTML")
         return
 
     summary = result.get("summary") or {}
@@ -919,40 +498,7 @@ async def cmd_cancel_sa(message: Message):
     """取消当前用户最近一次的自动添加到SA任务"""
     if not await check_user_permission(message):
         return
-
-    user_id = message.from_user.id
-    latest_message_id = None
-    latest_task = None
-    latest_created_at = -1.0
-
-    for msg_id, task_info in pending_sa_tasks.items():
-        if task_info.get("cancelled"):
-            continue
-        if task_info.get("user_id") != user_id:
-            continue
-        created_at = float(task_info.get("created_at") or 0)
-        if created_at >= latest_created_at:
-            latest_created_at = created_at
-            latest_message_id = msg_id
-            latest_task = task_info
-
-    if latest_task:
-        latest_task["cancelled"] = True
-        latest_task["task"].cancel()
-
-        await message.reply(
-            f"✅ 已取消最近一次自动添加任务\n\n"
-            f"🔗 链接: {latest_task['link']}",
-            parse_mode="HTML"
-        )
-        logging.info(
-            "❌ 用户取消了自动添加任务: user_id=%s message_id=%s link=%s",
-            user_id,
-            latest_message_id,
-            latest_task["link"],
-        )
-    else:
-        await message.reply("⚠️ 没有进行中的自动添加任务", parse_mode="HTML")
+    await hdhive_openapi_flow_service.cancel_latest_sa_task(message)
 
 
 @router.message(Command("llog"))
@@ -1027,268 +573,29 @@ async def cmd_search_movie(message: Message):
 # ==================== 核心搜索处理 ====================
 
 async def handle_search(message: Message, search_type: str):
-    """
-    处理搜索命令
-    
-    Args:
-        message: 消息对象
-        search_type: 'tv' 或 'movie'
-    """
-    # 权限检查
+    """处理搜索命令。"""
     if not await check_user_permission(message):
         return
-    
+
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         cmd = "/hdt" if search_type == "tv" else "/hdm"
-        await message.reply(
-            f"请使用: <code>{cmd} 名字或链接</code>",
-            parse_mode="HTML"
-        )
+        await message.reply(f"请使用: <code>{cmd} 名字或链接</code>", parse_mode="HTML")
         return
-    
-    user_input = args[1]
-    
-    # 解析链接
-    link_info = parse_hdhive_link(user_input)
-    
-    # ========== 优先级1: 资源直接链接 ==========
-    if link_info["type"] == "resource":
-        await handle_resource_link(message, link_info["id"], link_info.get("resource_url"))
-        return
-    
-    # ========== 优先级2: TMDB页面链接 ==========
-    if link_info["type"] == "tmdb":
-        await handle_tmdb_link(message, link_info["id"], link_info["media_type"])
-        return
-    
-    # ========== 优先级3: 关键词搜索 ==========
-    await handle_keyword_search(message, user_input, search_type)
+
+    await hdhive_openapi_flow_service.handle_search_input(message, args[1], search_type)
 
 
 async def handle_resource_link(message: Message, resource_id: str, resource_url: str | None = None):
-    """
-    处理资源直接链接
-    
-    Args:
-        message: 消息对象
-        resource_id: 资源ID
-    """
-    user_id = message.from_user.id
-    
-    wait_msg = await message.reply(
-        f"🔗 <b>检测到资源链接</b>\n\n"
-        f"🆔 <code>{resource_id}</code>\n"
-        f"⏳ 正在提取链接...",
-        parse_mode="HTML"
-    )
-    
-    try:
-        # 使用会话管理模式
-        result = await fetch_download_link(
-            resource_id,
-            user_id=user_id,
-            keep_session=True,
-            start_url=resource_url,
-        )
-    except Exception as exc:
-        logging.error("❌ 资源链接提取前置检查失败: %s", exc)
-        await wait_msg.edit_text(
-            format_error_message('fetch_failed'),
-            parse_mode="HTML"
-        )
-        return
-    website = (result or {}).get("website") or resource_website_cache.get(resource_id, "")
-    
-    if result and result.get("need_unlock"):
-        if await handle_unlock_required(
-            wait_msg=wait_msg,
-            fallback_msg=message,
-            resource_id=resource_id,
-            user_id=user_id,
-            result=result,
-            website=website,
-        ):
-            return
-    
-    elif result and (result.get("link") or result.get("need_unlock") is False):
-        # 成功提取链接 - 统一使用队列处理底层 unlock 接口
-        await fetch_download_link_and_handle_result(
-            wait_msg=wait_msg,
-            fallback_msg=message,
-            resource_id=resource_id,
-            user_id=user_id,
-            website=result.get("website") or website,
-        )
-        return
-    else:
-        await wait_msg.edit_text(
-            format_error_message('fetch_failed'),
-            parse_mode="HTML"
-        )
+    await hdhive_openapi_flow_service.handle_resource_link(message, resource_id, resource_url)
 
 
 async def handle_tmdb_link(message: Message, tmdb_id: str, media_type: str):
-    """
-    处理 TMDB 页面链接
-    
-    Args:
-        message: 消息对象
-        tmdb_id: TMDB ID 或 UUID
-        media_type: 'movie' 或 'tv'
-    """
-    type_name = "🎬 电影" if media_type == "movie" else "📺 剧集"
-    
-    wait_msg = await message.reply(
-        f"🔗 <b>检测到{type_name}页面</b>\n\n"
-        f"🆔 TMDB ID: <code>{tmdb_id}</code>\n"
-        f"⏳ 正在获取资源列表...",
-        parse_mode="HTML"
-    )
-
-    try:
-        resources = await get_resources_by_tmdb_id(tmdb_id, media_type)
-    except Exception as exc:
-        logging.error("❌ TMDB 页面资源获取失败: tmdb_id=%s media_type=%s error=%s", tmdb_id, media_type, exc)
-        await wait_msg.edit_text(format_error_message('fetch_failed'), parse_mode="HTML")
-        return
-    
-    if not resources:
-        await wait_msg.edit_text(
-            format_error_message('no_resources'),
-            parse_mode="HTML"
-        )
-        return
-    
-    # 格式化并发送资源列表
-    for res in resources:
-        rid = str(res.get("id") or "")
-        website = str(res.get("website") or "")
-        if rid and website:
-            resource_website_cache[rid] = website
-            trim_dict_cache(resource_website_cache, RESOURCE_WEBSITE_CACHE_LIMIT)
-
-    text, kb = format_resource_list(resources, media_type, provider_filter="115")
-    await wait_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
-    state_key = make_message_state_key(wait_msg)
-    if state_key:
-        resource_list_state[state_key] = {
-            "resources": resources,
-            "media_type": media_type,
-            "title": None,
-        }
-        trim_dict_cache(resource_list_state, RESOURCE_LIST_STATE_LIMIT)
+    await hdhive_openapi_flow_service.handle_tmdb_link(message, tmdb_id, media_type)
 
 
 async def handle_keyword_search(message: Message, keyword: str, search_type: str):
-    """
-    处理关键词搜索
-    
-    Args:
-        message: 消息对象
-        keyword: 搜索关键词
-        search_type: 'tv' 或 'movie'
-    """
-    media_type = "tv" if search_type == "tv" else "movie"
-    wait_msg = await message.reply(f"🔍 搜索中 · {keyword}", parse_mode="HTML")
-    
-    try:
-        start_ts = time.monotonic()
-        tmdb_info = None
-        resources = None
-
-        tmdb_result = await search_tmdb(keyword, media_type)
-
-        if not tmdb_result:
-            await wait_msg.edit_text(format_error_message('no_results'), parse_mode="HTML")
-            return
-
-        # 检查是否返回的是列表(多个结果)
-        if isinstance(tmdb_result, list):
-            # 多个搜索结果，让用户选择
-            await wait_msg.delete()
-
-            result_text, kb = build_tmdb_candidate_message(tmdb_result, page=0)
-            sent_msg = await message.reply(result_text, reply_markup=kb, parse_mode="HTML")
-            state_key = make_message_state_key(sent_msg)
-            if state_key:
-                tmdb_search_state[state_key] = {
-                    "results": tmdb_result,
-                    "page": 0,
-                }
-                trim_dict_cache(tmdb_search_state, TMDB_SEARCH_STATE_LIMIT)
-            elapsed = int((time.monotonic() - start_ts) * 1000)
-            logging.info("✅ TMDB多结果返回: keyword=%s type=%s count=%s cost_ms=%s", keyword, search_type, len(tmdb_result), elapsed)
-            return
-
-        # 单个结果兼容路径：如果调用方未来传了 dict，这里仍可继续工作
-        tmdb_info = tmdb_result
-        tmdb_id = tmdb_result["tmdb_id"]
-        result_type = tmdb_result["media_type"]
-        title = tmdb_result["title"]
-
-        # 发送TMDB信息（图片+简介）
-        if tmdb_info.get("poster_url"):
-            info_text = format_tmdb_info(tmdb_info)
-            try:
-                await message.reply_photo(
-                    photo=tmdb_info["poster_url"],
-                    caption=info_text,
-                    parse_mode="HTML"
-                )
-            except Exception:
-                await message.reply(info_text, parse_mode="HTML")
-
-        # 获取资源列表
-        logging.info(f"✅ TMDB匹配成功，获取资源: {title} (ID: {tmdb_id})")
-        resources = await get_resources_by_tmdb_id(tmdb_id, result_type)
-        
-        if not resources:
-            error_msg = format_error_message('no_results')
-            if tmdb_info:
-                await message.reply(error_msg, parse_mode="HTML")
-            else:
-                await wait_msg.edit_text(error_msg, parse_mode="HTML")
-            return
-
-        for res in resources:
-            rid = str(res.get("id") or "")
-            website = str(res.get("website") or "")
-            if rid and website:
-                resource_website_cache[rid] = website
-        
-        # 格式化资源列表
-        text, kb = format_resource_list(resources, media_type, provider_filter="115")
-        
-        # 发送资源列表
-        if tmdb_info:
-            sent_msg = await message.reply(text, reply_markup=kb, parse_mode="HTML")
-            state_key = make_message_state_key(sent_msg)
-            if state_key:
-                resource_list_state[state_key] = {
-                    "resources": resources,
-                    "media_type": media_type,
-                    "title": None,
-                }
-                trim_dict_cache(resource_list_state, RESOURCE_LIST_STATE_LIMIT)
-        else:
-            await wait_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
-            state_key = make_message_state_key(wait_msg)
-            if state_key:
-                resource_list_state[state_key] = {
-                    "resources": resources,
-                    "media_type": media_type,
-                    "title": None,
-                }
-                trim_dict_cache(resource_list_state, RESOURCE_LIST_STATE_LIMIT)
-
-        elapsed = int((time.monotonic() - start_ts) * 1000)
-        logging.info("✅ 关键词搜索完成: keyword=%s type=%s resources=%s cost_ms=%s", keyword, search_type, len(resources), elapsed)
-            
-    except Exception as e:
-        logging.error(f"❌ 搜索出错: {e}")
-        await wait_msg.edit_text(f"❌ 运行出错: {e}", parse_mode="HTML")
-
+    await hdhive_openapi_flow_service.handle_keyword_search(message, keyword, search_type)
 
 
 @router.callback_query(F.data.startswith(ASS_MENU_PREFIX))
@@ -1416,7 +723,7 @@ async def callback_ass_mux(callback: CallbackQuery):
         if payload == "refresh":
             ass_service.set_mux_inline_notice(msg.chat.id, callback.from_user.id, '🔄 <b>重新扫描中…</b> 正在刷新目录和计划')
             await msg.edit_text(format_rescan_running(), parse_mode="HTML")
-            session, preview = await ass_service.rebuild_mux_plan(msg.chat.id, callback.from_user.id)
+            await ass_service.rebuild_mux_plan(msg.chat.id, callback.from_user.id)
             ass_service.set_mux_inline_notice(msg.chat.id, callback.from_user.id, '✅ <b>已重新扫描</b> 如修改了默认字幕组/语言，新计划已生效。')
             await sync_ass_mux_view(callback.bot, msg.chat.id, callback.from_user.id)
             return
@@ -1664,10 +971,10 @@ async def callback_ass_mux(callback: CallbackQuery):
             pass
 
 
+# ==================== Emby 任务面板回调 ====================
 
-
-@router.callback_query(F.data.startswith(f"{EMBY_TASK_CALLBACK_PREFIX}:"))
-async def callback_emby_task(callback: CallbackQuery):
+@router.callback_query(F.data.startswith(EMBY_TASK_CALLBACK_PREFIX))
+async def callback_emby_tasks(callback: CallbackQuery):
     if not await check_callback_permission(callback):
         return
 
@@ -1676,212 +983,153 @@ async def callback_emby_task(callback: CallbackQuery):
         await callback.answer()
         return
 
+    await callback.answer()
+
     state_key = make_message_state_key(msg)
     state = emby_task_state.get(state_key or "")
     if not state:
-        await callback.answer("任务面板已失效，请重新发送 /emby_tasks", show_alert=True)
+        try:
+            tasks = await emby_task_service.list_tasks()
+        except Exception as exc:
+            logging.exception("❌ 刷新 Emby 任务列表失败")
+            await msg.edit_text(f"❌ 刷新 Emby 任务列表失败\n\n<code>{html.escape(str(exc))}</code>", parse_mode="HTML")
+            return
+        state = _build_emby_task_state(tasks, page=0, owner_user_id=callback.from_user.id, filter_mode="pro")
+        if state_key:
+            emby_task_state[state_key] = state
+            trim_dict_cache(emby_task_state, EMBY_TASK_STATE_LIMIT)
+
+    if state.get("owner_user_id") and state["owner_user_id"] != callback.from_user.id:
+        await callback.answer("⛔️ 只能由发起人操作", show_alert=True)
         return
 
-    if int(state.get("owner_user_id") or 0) != callback.from_user.id:
-        await callback.answer("只能由发起人操作", show_alert=True)
-        return
-
-    data = (callback.data or "").split(":", 2)
-    action = data[1] if len(data) > 1 else ""
-    raw_value = data[2] if len(data) > 2 else ""
-    page = int(state.get("page", 0) or 0)
+    data = callback.data[len(EMBY_TASK_CALLBACK_PREFIX):]
+    tasks = state.get("tasks") or []
+    page = int(state.get("page") or 0)
     filter_mode = str(state.get("filter_mode") or "all")
 
-    if action == "noop":
-        await callback.answer()
-        return
-
-    if action == "toggle_notify":
-        enabled = await emby_task_service.toggle_notify()
-        result = await emby_task_service.list_tasks()
-        if not result.get("ok"):
-            await callback.answer("切换成功，但刷新任务列表失败", show_alert=True)
-            return
-        tasks = result.get("tasks") or []
-        quick_actions = _build_pro_quick_actions(tasks, filter_mode)
+    async def _refresh_tasks_state(*, new_page: int | None = None, notice: str | None = None, force_tasks: list[dict] | None = None):
+        fresh_tasks = force_tasks
+        if fresh_tasks is None:
+            fresh_tasks = await emby_task_service.list_tasks()
+        state["tasks"] = fresh_tasks
+        current_page = page if new_page is None else new_page
+        state["page"] = current_page
+        filtered = filter_tasks_for_view(fresh_tasks, filter_mode)
+        summary = build_category_summary(fresh_tasks)
+        header_note = describe_filter_mode(filter_mode)
         panel_text, kb = build_tasks_panel(
-            tasks,
-            page=page,
-            notify_enabled=enabled,
-            status=result.get("status"),
+            filtered,
+            page=current_page,
+            summary=summary,
+            notify_enabled=emby_task_service.notify_enabled,
             filter_mode=filter_mode,
-            quick_actions=quick_actions,
+            header_note=header_note,
+            quick_actions=_build_pro_quick_actions(fresh_tasks, filter_mode),
         )
-        emby_task_state[state_key or ""] = _build_emby_task_state(
-            tasks,
-            page=page,
-            owner_user_id=callback.from_user.id,
-            filter_mode=filter_mode,
-        )
-        trim_dict_cache(emby_task_state, EMBY_TASK_STATE_LIMIT)
+        if notice:
+            panel_text = f"{notice}\n\n{panel_text}"
         await msg.edit_text(panel_text, reply_markup=kb, parse_mode="HTML")
-        await callback.answer(f"通知已{'开启' if enabled else '关闭'}")
-        return
+        if state_key:
+            emby_task_state[state_key] = state
+            trim_dict_cache(emby_task_state, EMBY_TASK_STATE_LIMIT)
 
-    if action == "summary":
-        tasks = state.get("tasks") or []
-        current_tasks = filter_tasks_for_view(tasks, filter_mode)
-        await callback.answer()
-        await msg.reply(
-            build_category_summary(current_tasks, title=f"{describe_filter_mode(filter_mode)}视图统计"),
-            parse_mode="HTML",
-        )
-        return
-
-    if action == "filter":
-        allowed_filters = {"all", "running", "pro", "library", "maintenance", "app"}
-        filter_mode = raw_value if raw_value in allowed_filters else "all"
-        page = 0
-        result = await emby_task_service.list_tasks()
-        if not result.get("ok"):
-            await callback.answer("切换视图失败", show_alert=True)
+    try:
+        if data == "refresh":
+            await _refresh_tasks_state(new_page=page)
             return
-        tasks = result.get("tasks") or []
-        quick_actions = _build_pro_quick_actions(tasks, filter_mode)
-        panel_text, kb = build_tasks_panel(
-            tasks,
-            page=page,
-            notify_enabled=bool(emby_task_service.notify_enabled),
-            status=result.get("status"),
-            filter_mode=filter_mode,
-            quick_actions=quick_actions,
-        )
-        emby_task_state[state_key or ""] = _build_emby_task_state(
-            tasks,
-            page=page,
-            owner_user_id=callback.from_user.id,
-            filter_mode=filter_mode,
-        )
-        trim_dict_cache(emby_task_state, EMBY_TASK_STATE_LIMIT)
-        await msg.edit_text(panel_text, reply_markup=kb, parse_mode="HTML")
-        await callback.answer(f"已切换到{describe_filter_mode(filter_mode)}视图")
-        return
 
-    if action == "quick_start":
-        task_id = raw_value
-        op_result = await emby_task_service.start_task(task_id)
-        result = await emby_task_service.list_tasks()
-        if not result.get("ok"):
-            await msg.edit_text(f"❌ {html.escape(str(result.get('message') or '未知错误'))}", parse_mode="HTML")
-            return
-        tasks = result.get("tasks") or []
-        quick_actions = _build_pro_quick_actions(tasks, filter_mode)
-        page = 0
-        panel_text, kb = build_tasks_panel(
-            tasks,
-            page=page,
-            notify_enabled=bool(emby_task_service.notify_enabled),
-            status=result.get("status"),
-            filter_mode=filter_mode,
-            quick_actions=quick_actions,
-        )
-        emby_task_state[state_key or ""] = _build_emby_task_state(
-            tasks,
-            page=page,
-            owner_user_id=callback.from_user.id,
-            filter_mode=filter_mode,
-        )
-        trim_dict_cache(emby_task_state, EMBY_TASK_STATE_LIMIT)
-        await msg.edit_text(panel_text, reply_markup=kb, parse_mode="HTML")
-        await callback.answer(
-            str(op_result.get("message") or ("操作成功" if op_result.get("ok") else "操作失败")),
-            show_alert=not bool(op_result.get("ok")),
-        )
-        return
-
-    if action in {"page", "refresh"}:
-        if action == "page":
+        if data.startswith("page:"):
             try:
-                page = int(raw_value)
+                new_page = int(data.split(":", 1)[1])
             except ValueError:
-                page = 0
-        result = await emby_task_service.list_tasks()
-        if not result.get("ok"):
-            await callback.answer("刷新失败", show_alert=True)
-            await msg.edit_text(f"❌ {html.escape(str(result.get('message') or '未知错误'))}", parse_mode="HTML")
+                await callback.answer("页码无效", show_alert=True)
+                return
+            await _refresh_tasks_state(new_page=new_page, force_tasks=tasks)
             return
-        tasks = result.get("tasks") or []
-        quick_actions = _build_pro_quick_actions(tasks, filter_mode)
-        panel_text, kb = build_tasks_panel(
-            tasks,
-            page=page,
-            notify_enabled=bool(emby_task_service.notify_enabled),
-            status=result.get("status"),
-            filter_mode=filter_mode,
-            quick_actions=quick_actions,
-        )
-        emby_task_state[state_key or ""] = _build_emby_task_state(
-            tasks,
-            page=page,
-            owner_user_id=callback.from_user.id,
-            filter_mode=filter_mode,
-        )
-        trim_dict_cache(emby_task_state, EMBY_TASK_STATE_LIMIT)
-        await msg.edit_text(panel_text, reply_markup=kb, parse_mode="HTML")
-        await callback.answer("已刷新")
-        return
 
-    if action == "detail":
-        task_id = raw_value
-        result = await emby_task_service.list_tasks()
-        if not result.get("ok"):
-            await callback.answer("刷新详情失败", show_alert=True)
+        if data.startswith("view:"):
+            requested_mode = (data.split(":", 1)[1] or "all").strip().lower()
+            normalized_mode = requested_mode if requested_mode in {"all", "running", "pro", "queued", "completed", "failed"} else "all"
+            if normalized_mode == filter_mode:
+                await _refresh_tasks_state(new_page=0, force_tasks=tasks)
+                return
+            state["filter_mode"] = normalized_mode
+            filter_mode = normalized_mode
+            await _refresh_tasks_state(new_page=0, force_tasks=tasks)
             return
-        tasks = result.get("tasks") or []
-        try:
-            detail_text, kb = build_task_detail(tasks, task_id, page=page, filter_mode=filter_mode)
-        except IndexError:
-            await callback.answer("任务已不存在或当前视图不可见", show_alert=True)
-            return
-        emby_task_state[state_key or ""] = _build_emby_task_state(
-            tasks,
-            page=page,
-            owner_user_id=callback.from_user.id,
-            filter_mode=filter_mode,
-        )
-        trim_dict_cache(emby_task_state, EMBY_TASK_STATE_LIMIT)
-        await msg.edit_text(detail_text, reply_markup=kb, parse_mode="HTML")
-        await callback.answer()
-        return
 
-    if action in {"start", "stop"}:
-        task_id = raw_value
-        op_result = await (emby_task_service.start_task(task_id) if action == "start" else emby_task_service.stop_task(task_id))
-        result = await emby_task_service.list_tasks()
-        if not result.get("ok"):
-            await msg.edit_text(f"❌ {html.escape(str(result.get('message') or '未知错误'))}", parse_mode="HTML")
+        if data == "notify":
+            enabled = await emby_task_service.toggle_notify_enabled()
+            status_text = "✅ 已开启后台通知" if enabled else "🔕 已关闭后台通知"
+            await _refresh_tasks_state(new_page=page, notice=status_text)
             return
-        tasks = result.get("tasks") or []
-        emby_task_state[state_key or ""] = _build_emby_task_state(
-            tasks,
-            page=page,
-            owner_user_id=callback.from_user.id,
-            filter_mode=filter_mode,
-        )
-        trim_dict_cache(emby_task_state, EMBY_TASK_STATE_LIMIT)
-        try:
-            detail_text, kb = build_task_detail(tasks, task_id, page=page, filter_mode=filter_mode)
+
+        if data.startswith("detail:"):
+            task_id = data.split(":", 1)[1]
+            detail = await emby_task_service.get_task(task_id)
+            detail_text, kb = build_task_detail(detail, page=page, owner_user_id=callback.from_user.id)
             await msg.edit_text(detail_text, reply_markup=kb, parse_mode="HTML")
-        except IndexError:
-            quick_actions = _build_pro_quick_actions(tasks, filter_mode)
-            panel_text, kb = build_tasks_panel(
-                tasks,
-                page=page,
-                notify_enabled=bool(emby_task_service.notify_enabled),
-                status=result.get("status"),
-                filter_mode=filter_mode,
-                quick_actions=quick_actions,
-            )
-            await msg.edit_text(panel_text, reply_markup=kb, parse_mode="HTML")
-        await callback.answer(str(op_result.get("message") or ("操作成功" if op_result.get("ok") else "操作失败")), show_alert=not bool(op_result.get("ok")))
-        return
+            return
 
-    await callback.answer("未知操作", show_alert=True)
+        if data.startswith("back:"):
+            page_raw = data.split(":", 1)[1]
+            try:
+                back_page = int(page_raw)
+            except ValueError:
+                back_page = 0
+            await _refresh_tasks_state(new_page=back_page)
+            return
+
+        if data.startswith("quick_start:"):
+            task_id = data.split(":", 1)[1]
+            started = await emby_task_service.start_task(task_id)
+            if not started:
+                await callback.answer("❌ 启动失败", show_alert=True)
+                return
+            await callback.answer("✅ 已启动任务")
+            await _refresh_tasks_state(new_page=page, notice="✅ 已启动任务")
+            return
+
+        if data.startswith("start:"):
+            task_id = data.split(":", 1)[1]
+            started = await emby_task_service.start_task(task_id)
+            if not started:
+                await callback.answer("❌ 启动失败", show_alert=True)
+                return
+            await callback.answer("✅ 已启动任务")
+            try:
+                detail = await emby_task_service.get_task(task_id)
+                detail_text, kb = build_task_detail(detail, page=page, owner_user_id=callback.from_user.id)
+                detail_text = f"✅ 已启动任务\n\n{detail_text}"
+                await msg.edit_text(detail_text, reply_markup=kb, parse_mode="HTML")
+            except Exception:
+                await _refresh_tasks_state(new_page=page, notice="✅ 已启动任务")
+            return
+
+        if data.startswith("stop:"):
+            task_id = data.split(":", 1)[1]
+            stopped = await emby_task_service.stop_task(task_id)
+            if not stopped:
+                await callback.answer("❌ 停止失败", show_alert=True)
+                return
+            await callback.answer("🛑 已请求停止任务")
+            try:
+                detail = await emby_task_service.get_task(task_id)
+                detail_text, kb = build_task_detail(detail, page=page, owner_user_id=callback.from_user.id)
+                detail_text = f"🛑 已请求停止任务\n\n{detail_text}"
+                await msg.edit_text(detail_text, reply_markup=kb, parse_mode="HTML")
+            except Exception:
+                await _refresh_tasks_state(new_page=page, notice="🛑 已请求停止任务")
+            return
+
+        await callback.answer("未知操作", show_alert=True)
+    except Exception as exc:
+        logging.exception("❌ 处理 Emby 任务回调失败")
+        await msg.edit_text(f"❌ 操作失败\n\n<code>{html.escape(str(exc))}</code>", parse_mode="HTML")
+
+
+# ==================== /rm_strm 确认按钮 ====================
 
 @router.callback_query(F.data.startswith("rm_strm_confirm:"))
 async def callback_rm_strm_confirm(callback: CallbackQuery):
@@ -1893,36 +1141,60 @@ async def callback_rm_strm_confirm(callback: CallbackQuery):
         await callback.answer()
         return
 
-    key = (callback.data or "").split(":", 1)[1]
-    if str(msg.message_id) != key:
-        await callback.answer("确认消息不匹配", show_alert=True)
-        return
-
     state_key = make_message_state_key(msg)
     pending = rm_strm_pending_confirms.get(state_key or "")
     if not pending:
-        await callback.answer("确认已失效，请重新执行 /rm_strm", show_alert=True)
+        await callback.answer("⚠️ 该预览已失效，请重新执行 /rm_strm", show_alert=True)
         return
 
-    if pending.get("user_id") != callback.from_user.id:
+    owner_user_id = pending.get("user_id")
+    if owner_user_id and owner_user_id != callback.from_user.id:
         await callback.answer("只能由发起人确认删除", show_alert=True)
         return
 
     created_at = float(pending.get("created_at") or 0)
-    if time.time() - created_at > RM_STRM_CONFIRM_TTL:
-        if state_key:
-            rm_strm_pending_confirms.pop(state_key, None)
-        await msg.edit_reply_markup(reply_markup=None)
-        await callback.answer("确认已过期，请重新执行 /rm_strm", show_alert=True)
+    if created_at and time.time() - created_at > RM_STRM_CONFIRM_TTL:
+        rm_strm_pending_confirms.pop(state_key, None)
+        await callback.answer("⚠️ 该预览已过期，请重新执行 /rm_strm", show_alert=True)
         return
 
-    await callback.answer("开始删除…")
-    await msg.edit_text("🧹 已确认，正在执行 STRM 空目录实际删除…", parse_mode="HTML")
-    result = await strm_prune_service.run(apply_changes=True)
-    if state_key:
-        rm_strm_pending_confirms.pop(state_key, None)
-    prefix = "✅" if result.get("ok") else "❌"
-    await msg.edit_text(f"{prefix} {result.get('message', '未知结果')}", parse_mode="HTML")
+    await callback.answer("⚠️ 正在执行实际删除...", show_alert=False)
+    await msg.edit_text("⏳ 正在执行 STRM 空目录实际删除...", parse_mode="HTML")
+
+    try:
+        result = await strm_prune_service.execute(callback.from_user.id)
+        preview_text = str(pending.get("preview_text") or "")
+        result_text = result.get("message", "✅ 已完成 STRM 空目录清理")
+        summary = result.get("summary") or {}
+        deleted_total = int(summary.get("deleted_total", 0) or 0)
+        deleted_dirs = int(summary.get("deleted_dirs", 0) or 0)
+        deleted_roots = int(summary.get("deleted_roots", 0) or 0)
+
+        final_text = (
+            "✅ <b>STRM 空目录清理已完成</b>\n\n"
+            f"📂 删除目录数: <code>{deleted_total}</code>"
+        )
+        if deleted_roots:
+            final_text += f"\n🚩 其中根目录删除: <code>{deleted_roots}</code>"
+        if deleted_dirs:
+            final_text += f"\n📁 其中普通目录删除: <code>{deleted_dirs}</code>"
+        final_text += f"\n\n{result_text}"
+        if preview_text:
+            final_text += f"\n\n<b>删除前预览：</b>\n{preview_text}"
+
+        if state_key:
+            rm_strm_pending_confirms.pop(state_key, None)
+        await msg.edit_text(final_text, parse_mode="HTML")
+    except Exception as exc:
+        logging.exception("❌ 执行 STRM 空目录清理失败")
+        preview_text = str(pending.get("preview_text") or "")
+        if state_key:
+            rm_strm_pending_confirms.pop(state_key, None)
+        await msg.edit_text(
+            f"❌ STRM 空目录清理失败\n\n<code>{html.escape(str(exc))}</code>"
+            + (f"\n\n<b>删除前预览：</b>\n{preview_text}" if preview_text else ""),
+            parse_mode="HTML",
+        )
 
 
 @router.callback_query(F.data.startswith("rm_strm_cancel:"))
@@ -1935,18 +1207,14 @@ async def callback_rm_strm_cancel(callback: CallbackQuery):
         await callback.answer()
         return
 
-    key = (callback.data or "").split(":", 1)[1]
-    if str(msg.message_id) != key:
-        await callback.answer("取消消息不匹配", show_alert=True)
-        return
-
     state_key = make_message_state_key(msg)
     pending = rm_strm_pending_confirms.get(state_key or "")
     if not pending:
-        await callback.answer("这条确认已失效", show_alert=True)
+        await callback.answer("⚠️ 该预览已失效", show_alert=True)
         return
 
-    if pending.get("user_id") != callback.from_user.id:
+    owner_user_id = pending.get("user_id")
+    if owner_user_id and owner_user_id != callback.from_user.id:
         await callback.answer("只能由发起人取消", show_alert=True)
         return
 
@@ -1962,27 +1230,7 @@ async def callback_provider_filter(callback: CallbackQuery):
     """切换资源网盘筛选（常驻按钮）"""
     if not await check_callback_permission(callback):
         return
-
-    msg = callback.message
-    if not msg:
-        await callback.answer()
-        return
-
-    state_key = make_message_state_key(msg)
-    state = resource_list_state.get(state_key or "")
-    if not state:
-        await callback.answer("列表已过期，请重新搜索", show_alert=True)
-        return
-
-    provider = (callback.data or "pf:115").split(":", 1)[1]
-    text, kb = format_resource_list(
-        state["resources"],
-        state["media_type"],
-        title=state.get("title"),
-        provider_filter=provider,
-    )
-    await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
-    await callback.answer()
+    await hdhive_openapi_flow_service.handle_provider_filter_callback(callback)
 
 
 @router.callback_query(F.data.startswith("tmdb_page:"))
@@ -1990,33 +1238,7 @@ async def callback_tmdb_page(callback: CallbackQuery):
     """切换 TMDB 候选列表分页。"""
     if not await check_callback_permission(callback):
         return
-
-    msg = callback.message
-    if not msg:
-        await callback.answer()
-        return
-
-    state_key = make_message_state_key(msg)
-    state = tmdb_search_state.get(state_key or "")
-    if not state:
-        await callback.answer("列表已过期，请重新搜索", show_alert=True)
-        return
-
-    action = (callback.data or "tmdb_page:noop").split(":", 1)[1]
-    if action == "noop":
-        await callback.answer()
-        return
-
-    try:
-        page = int(action)
-    except ValueError:
-        await callback.answer("页码无效", show_alert=True)
-        return
-
-    state["page"] = page
-    text, kb = build_tmdb_candidate_message(state["results"], page=page)
-    await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
-    await callback.answer()
+    await hdhive_openapi_flow_service.handle_tmdb_page_callback(callback)
 
 @router.callback_query(F.data.regexp(r"^(movie|tv)_\d+:"))
 async def callback_get_resource(callback: CallbackQuery):
@@ -2031,76 +1253,7 @@ async def callback_get_resource(callback: CallbackQuery):
     """
     if not await check_callback_permission(callback):
         return
-
-    await callback.answer()
-
-    wait_msg: Message | None = None
-
-    try:
-        msg = callback.message
-        if not msg:
-            return
-
-        user_id = callback.from_user.id
-
-        # 解析回调数据
-        data_parts = (callback.data or "").split(":")
-        if len(data_parts) != 2:
-            await msg.answer("❌ 数据格式错误")
-            return
-
-        resource_id = data_parts[1]
-
-        # 单独发一条结果消息，避免覆盖资源选择页
-        wait_msg = await msg.reply(
-            f"⏳ 正在提取链接...\n🆔 <code>{resource_id}</code>",
-            parse_mode="HTML"
-        )
-
-        # 提取链接（使用会话管理）
-        try:
-            result = await fetch_download_link(resource_id, user_id=user_id, keep_session=True)
-        except Exception as exc:
-            logging.error("❌ 资源选择前置检查失败: %s", exc)
-            await wait_msg.edit_text(
-                format_error_message('fetch_failed'),
-                parse_mode="HTML"
-            )
-            return
-        website = (result or {}).get("website") or resource_website_cache.get(resource_id, "")
-
-        if result and result.get("need_unlock"):
-            if await handle_unlock_required(
-                wait_msg=wait_msg,
-                fallback_msg=msg,
-                resource_id=resource_id,
-                user_id=user_id,
-                result=result,
-                website=website,
-            ):
-                return
-
-        if result and (result.get("link") or result.get("need_unlock") is False):
-            await fetch_download_link_and_handle_result(
-                wait_msg=wait_msg,
-                fallback_msg=msg,
-                resource_id=resource_id,
-                user_id=user_id,
-                website=result.get("website") or website,
-            )
-            return
-
-        await wait_msg.edit_text(
-            format_error_message('fetch_failed'),
-            parse_mode="HTML"
-        )
-
-    except Exception as e:
-        logging.error(f"❌ 回调处理出错: {e}")
-        if wait_msg is not None:
-            await wait_msg.edit_text(f"❌ 处理出错: {e}", parse_mode="HTML")
-        elif callback.message:
-            await callback.message.answer(f"❌ 处理出错: {e}", parse_mode="HTML")
+    await hdhive_openapi_flow_service.handle_resource_callback(callback)
 
 
 @router.callback_query(F.data.startswith("unlock:"))
@@ -2112,25 +1265,7 @@ async def callback_unlock_resource(callback: CallbackQuery):
     """
     if not await check_callback_permission(callback):
         return
-
-    await callback.answer("🔓 正在解锁...")
-    
-    try:
-        user_id = callback.from_user.id
-        resource_id = callback.data.split(":")[1]
-
-        await perform_unlock_and_handle_result(
-            wait_msg=callback.message,
-            fallback_msg=callback.message,
-            resource_id=resource_id,
-            user_id=user_id,
-            auto_unlock=False,
-            website=resource_website_cache.get(resource_id, ""),
-        )
-            
-    except Exception as e:
-        logging.error(f"❌ 解锁出错: {e}")
-        await callback.message.edit_text(f"❌ 解锁出错: {e}", parse_mode="HTML")
+    await hdhive_openapi_flow_service.handle_unlock_callback(callback)
 
 
 @router.callback_query(F.data == "cancel_unlock")
@@ -2138,126 +1273,11 @@ async def callback_cancel_unlock(callback: CallbackQuery):
     """处理取消解锁回调"""
     if not await check_callback_permission(callback):
         return
-
-    await callback.answer("已取消")
-    
-    # 关闭会话
-    user_id = callback.from_user.id
-    # 从消息中提取 resource_id
-    import re
-    match = re.search(r'🆔\s*<code>([a-f0-9-]+)</code>', callback.message.text or "")
-    if match:
-        resource_id = match.group(1)
-        session_id = f"{user_id}:{resource_id}"
-        await session_manager.close_session(session_id)
-        logging.info(f"🚫 用户取消解锁，已关闭会话: {session_id}")
-    
-    await callback.message.edit_text("❌ 已取消解锁", parse_mode="HTML")
+    await hdhive_openapi_flow_service.handle_cancel_unlock_callback(callback)
 
 
 async def auto_add_to_sa(task_key: str, link: str, original_message: Message, countdown: int = 60):
-    """
-    倒计时自动添加到SA
-    
-    Args:
-        task_key: 任务键（chat_id:message_id）
-        link: 115链接
-        original_message: 原始消息对象
-        countdown: 倒计时秒数（默认60秒）
-    """
-    try:
-        if not SA_ENABLE_115_PUSH:
-            logging.info("⏭️ 已禁用115推送到SA，跳过自动添加: %s", link)
-            return
-
-        if not is_115_share_link(link):
-            logging.info("⏭️ 跳过自动添加到SA（非115链接）: %s", link)
-            return
-
-        # 等待倒计时（每10秒更新一次）
-        step = 10 if countdown > 10 else max(1, countdown)
-        for remaining in range(countdown, 0, -step):
-            # 检查是否被取消
-            if task_key in pending_sa_tasks and pending_sa_tasks[task_key].get("cancelled"):
-                logging.info(f"⏹️ 用户取消了自动添加: {link}")
-                return
-            
-            # 更新倒计时显示
-            try:
-                await original_message.edit_text(
-                    f"✅ <b>提取成功</b>\n\n"
-                    f"<blockquote>\n"
-                    f"🔗 <a href='{link}'>115网盘链接</a>\n"
-                    f"</blockquote>\n\n"
-                    f"⏱️ 将在 {remaining} 秒后自动添加到 Symedia\n"
-                    f"💡 不需要的话发送 /hdc 取消",
-                    parse_mode="HTML",
-                    disable_web_page_preview=True
-                )
-            except Exception as exc:
-                logging.debug("更新自动添加倒计时消息失败: %s", exc)
-            
-            await asyncio.sleep(step if remaining > step else remaining)
-        
-        # 倒计时结束，检查是否被取消
-        if task_key in pending_sa_tasks and pending_sa_tasks[task_key].get("cancelled"):
-            return
-        
-        # 执行添加到SA
-        logging.info(f"⏰ 倒计时结束，自动添加到SA: {link}")
-        
-        # 构建API URL
-        api_url = f"{SA_URL}/api/v1/plugin/cloud_helper/add_share_urls_115"
-        
-        # 构建请求体
-        payload = {
-            "urls": [link],
-            "parent_id": SA_PARENT_ID
-        }
-        
-        # 发送POST请求
-        async with aiohttp.ClientSession(timeout=SA_HTTP_TIMEOUT, headers=SA_HTTP_HEADERS) as session:
-            async with session.post(api_url, params={"token": SA_TOKEN}, json=payload) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    message = data.get("message", "添加成功")
-                    
-                    # 通知用户成功
-                    notification = (
-                        "🎬 <b>已自动添加到Symedia</b>\n"
-                        "━━━━━━━━━━━━━━━━\n\n"
-                        f"📊 <b>状态:</b> {message}\n"
-                        f"🔗 <b>链接:</b> <code>{link}</code>\n"
-                        f"📁 <b>目录ID:</b> <code>{SA_PARENT_ID}</code>\n"
-                        f"⏰ <b>方式:</b> 自动添加"
-                    )
-                    
-                    await original_message.edit_text(notification, parse_mode="HTML")
-                    
-                    logging.info(f"✅ 自动添加到SA成功: {link} - {message}")
-                else:
-                    error_text = await response.text()
-                    logging.error(f"❌ SA API返回错误: {response.status} - {error_text}")
-                    await original_message.edit_text(
-                        f"❌ 自动添加到SA失败: HTTP {response.status}",
-                        parse_mode="HTML"
-                    )
-        
-    except asyncio.CancelledError:
-        logging.info(f"⏹️ 自动添加任务被取消: {link}")
-    except Exception as e:
-        logging.error(f"❌ 自动添加到SA失败: {e}")
-        try:
-            await original_message.edit_text(
-                f"❌ 自动添加失败: {str(e)}",
-                parse_mode="HTML"
-            )
-        except Exception as exc:
-            logging.debug("更新自动添加失败提示消息失败: %s", exc)
-    finally:
-        # 清理任务
-        if task_key in pending_sa_tasks:
-            del pending_sa_tasks[task_key]
+    await hdhive_openapi_flow_service.auto_add_to_sa(task_key, link, original_message, countdown=countdown)
 
 
 @router.callback_query(F.data.startswith("send_to_group:"))
@@ -2269,72 +1289,7 @@ async def callback_send_to_sa(callback: CallbackQuery):
     """
     if not await check_callback_permission(callback):
         return
-
-    try:
-        # 提取链接
-        link = callback.data.replace("send_to_group:", "")
-
-        if not is_115_share_link(link):
-            await callback.answer("❌ 仅支持115链接添加到Symedia", show_alert=True)
-            return
-        
-        # 检查是否配置了SA
-        if not SA_ENABLE_115_PUSH:
-            await callback.answer("⚠️ 已禁用115推送到Symedia", show_alert=True)
-            return
-
-        if not SA_URL or not SA_PARENT_ID:
-            await callback.answer("❌ 未配置SA，无法添加到Symedia", show_alert=True)
-            return
-        
-        # 构建API URL
-        api_url = f"{SA_URL}/api/v1/plugin/cloud_helper/add_share_urls_115"
-        
-        # 构建请求体
-        payload = {
-            "urls": [link],
-            "parent_id": SA_PARENT_ID
-        }
-        
-        # 显示处理状态
-        await callback.answer("⏳ 正在添加到Symedia...", show_alert=False)
-        
-        # 发送POST请求
-        async with aiohttp.ClientSession(timeout=SA_HTTP_TIMEOUT, headers=SA_HTTP_HEADERS) as session:
-            async with session.post(api_url, params={"token": SA_TOKEN}, json=payload) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    message = data.get("message", "添加成功")
-                    
-                    # 发送详细通知消息
-                    notification = (
-                        "🎬 <b>已添加到Symedia</b>\n"
-                        "━━━━━━━━━━━━━━━━\n\n"
-                        f"📊 <b>状态:</b> {message}\n"
-                        f"🔗 <b>链接:</b> <code>{link}</code>\n"
-                        f"📁 <b>目录ID:</b> <code>{SA_PARENT_ID}</code>"
-                    )
-                    
-                    await callback.message.reply(notification, parse_mode="HTML")
-                    
-                    # 移除按钮
-                    await callback.message.edit_reply_markup(reply_markup=None)
-                    
-                    logging.info(f"✅ 成功添加到SA: {link} - {message}")
-                else:
-                    error_text = await response.text()
-                    logging.error(f"❌ SA API返回错误: {response.status} - {error_text}")
-                    await callback.message.reply(
-                        f"❌ 添加到 Symedia 失败: HTTP {response.status}",
-                        parse_mode="HTML"
-                    )
-        
-    except aiohttp.ClientError as e:
-        logging.error(f"❌ 网络请求失败: {e}")
-        await callback.answer("❌ 网络请求失败，请检查SA配置", show_alert=True)
-    except Exception as e:
-        logging.error(f"❌ 添加到SA失败: {e}")
-        await callback.answer(f"❌ 添加失败: {str(e)}", show_alert=True)
+    await hdhive_openapi_flow_service.handle_send_to_sa_callback(callback)
 
 
 # ==================== 直接链接处理（放在所有Command之后）====================
@@ -2366,306 +1321,12 @@ async def handle_direct_link(message: Message):
             await sync_ass_mux_view(message.bot, message.chat.id, message.from_user.id)
         return
 
-    # 如果是命令，跳过（由其他handler处理）
-    if text.startswith('/'):
-        return
-
-    # 是否启用“直接发送 HDHive 链接自动解析”
-    if not HDHIVE_PARSE_INCOMING_LINKS:
-        return
-    
-    # 获取 entities (text 或 caption_entities)
-    entities = message.entities or message.caption_entities
-    
-    # 从 entities 中提取所有链接
-    urls = []
-    if entities:
-        for entity in entities:
-            # url: 纯文本URL
-            # text_link: 超链接(文字背后的URL)
-            if entity.type == "url":
-                # 从消息文本中提取URL
-                url = text[entity.offset:entity.offset + entity.length]
-                urls.append(url)
-            elif entity.type == "text_link":
-                # 直接从entity.url获取
-                urls.append(entity.url)
-    
-    # 如果没有找到任何链接，忽略
-    if not urls:
-        return
-    
-    # 过滤出 hdhive.com 链接
-    hdhive_urls = [url for url in urls if 'hdhive.com' in url]
-    
-    if not hdhive_urls:
-        return
-    
-    logging.info(f"📎 从消息中提取到 {len(hdhive_urls)} 个HDHive链接: {hdhive_urls}")
-    
-    # 优先处理resource/115链接，其次resource链接（即使消息中有其他链接）
-    resource_url = None
-    for url in hdhive_urls:
-        if '/resource/115/' in url:
-            resource_url = url
-            break
-    if not resource_url:
-        for url in hdhive_urls:
-            if '/resource/' in url:
-                resource_url = url
-                break
-    
-    if resource_url:
-        user_id = message.from_user.id
-        
-        # 从URL中提取resource ID
-        resource_match = re.search(r'/resource/(?:115/)?([a-f0-9-]+)', resource_url)
-        if resource_match:
-            resource_id = resource_match.group(1)
-        else:
-            await message.reply(
-                "❌ 资源链接格式不正确，无法解析资源ID",
-                parse_mode="HTML"
-            )
-            return
-        
-        wait_msg = await message.reply(
-            f"🔗 <b>检测到资源链接</b>\n\n"
-            f"🆔 <code>{resource_id}</code>\n"
-            f"⏳ 正在提取链接...",
-            parse_mode="HTML"
-        )
-        
-        try:
-            # 使用会话管理
-            result = await fetch_download_link(
-                resource_id,
-                user_id=user_id,
-                keep_session=True,
-                start_url=resource_url,
-            )
-        except Exception as exc:
-            logging.error("❌ 直接链接前置检查失败: %s", exc)
-            await wait_msg.edit_text(
-                format_error_message('fetch_failed'),
-                parse_mode="HTML"
-            )
-            return
-        website = (result or {}).get("website") or resource_website_cache.get(resource_id, "")
-        
-        if result and result.get("need_unlock"):
-            if await handle_unlock_required(
-                wait_msg=wait_msg,
-                fallback_msg=message,
-                resource_id=resource_id,
-                user_id=user_id,
-                result=result,
-                website=website,
-            ):
-                return
-        
-        elif result and (result.get("link") or result.get("need_unlock") is False):
-            await fetch_download_link_and_handle_result(
-                wait_msg=wait_msg,
-                fallback_msg=message,
-                resource_id=resource_id,
-                user_id=user_id,
-                website=result.get("website") or website,
-            )
-            return
-
-        await wait_msg.edit_text(
-            format_error_message('fetch_failed'),
-            parse_mode="HTML"
-        )
-        return
-    
-    # 处理TMDB链接（tv/movie）- 从提取的URL中查找
-    tmdb_url = None
-    for url in hdhive_urls:
-        if '/movie/' in url or '/tv/' in url:
-            tmdb_url = url
-            break
-    
-    if tmdb_url:
-        # 解析TMDB链接
-        link_info = parse_hdhive_link(tmdb_url)
-        if link_info["type"] == "tmdb":
-            tmdb_id = link_info["id"]
-            media_type = link_info["media_type"]
-            type_name = "🎬 电影" if media_type == "movie" else "📺 剧集"
-            
-            wait_msg = await message.reply(
-                f"🔗 <b>检测到{type_name}页面</b>\n\n"
-                f"🆔 TMDB ID: <code>{tmdb_id}</code>\n"
-                f"⏳ 正在获取资源列表...",
-                parse_mode="HTML"
-            )
-            
-            try:
-                resources = await get_resources_by_tmdb_id(tmdb_id, media_type)
-            except Exception as exc:
-                logging.error("❌ 直发 TMDB 页面资源获取失败: tmdb_id=%s media_type=%s error=%s", tmdb_id, media_type, exc)
-                await wait_msg.edit_text(format_error_message('fetch_failed'), parse_mode="HTML")
-                return
-            
-            if not resources:
-                await wait_msg.edit_text(f"❌ 该{type_name}暂无资源", parse_mode="HTML")
-                return
-
-            for res in resources:
-                rid = str(res.get("id") or "")
-                website = str(res.get("website") or "")
-                if rid and website:
-                    resource_website_cache[rid] = website
-            
-            text, kb = format_resource_list(resources, media_type, provider_filter="115")
-            await wait_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
-            state_key = make_message_state_key(wait_msg)
-            if state_key:
-                resource_list_state[state_key] = {
-                    "resources": resources,
-                    "media_type": media_type,
-                    "title": None,
-                }
-                trim_dict_cache(resource_list_state, RESOURCE_LIST_STATE_LIMIT)
-            return
+    await hdhive_openapi_flow_service.handle_direct_link_message(message)
 
 
 @router.callback_query(F.data.startswith("select_tmdb:"))
 async def callback_select_tmdb(callback: CallbackQuery):
-    """
-    处理用户选择TMDB搜索结果
-    
-    Callback data 格式: select_tmdb:tmdb_id:media_type
-    """
+    """处理用户选择TMDB搜索结果。"""
     if not await check_callback_permission(callback):
         return
-
-    await callback.answer()
-
-    try:
-        msg = callback.message
-        if not msg:
-            return
-
-        tmdb_info = None
-        state_key = make_message_state_key(msg)
-        state = tmdb_search_state.get(state_key or "")
-
-        if state:
-            parts = (callback.data or "").split(":")
-            if len(parts) != 2:
-                await callback.answer("数据格式错误", show_alert=True)
-                return
-            try:
-                selected_index = int(parts[1])
-            except ValueError:
-                await callback.answer("选择项无效", show_alert=True)
-                return
-
-            results = state.get("results") or []
-            if selected_index < 0 or selected_index >= len(results):
-                await callback.answer("列表已过期，请重新搜索", show_alert=True)
-                return
-
-            tmdb_info = results[selected_index]
-            tmdb_id = str(tmdb_info["tmdb_id"])
-            media_type = tmdb_info["media_type"]
-            if state_key:
-                tmdb_search_state.pop(state_key, None)
-        else:
-            # 兼容旧格式: select_tmdb:12345:movie
-            parts = (callback.data or "").split(":")
-            if len(parts) != 3:
-                await callback.answer("列表已过期，请重新搜索", show_alert=True)
-                return
-            tmdb_id = parts[1]
-            media_type = parts[2]
-        
-        # 显示加载状态
-        await callback.message.edit_text("⏳ 正在获取TMDB信息...", parse_mode="HTML")
-        
-        # 获取TMDB详细信息
-        tmdb_info = await get_tmdb_details(int(tmdb_id), media_type) or tmdb_info
-        
-        if tmdb_info:
-            # 构建TMDB信息文本
-            info_text = f"<b>{tmdb_info['title']}</b>\n"
-            if tmdb_info.get("release_date"):
-                info_text += f"{tmdb_info['release_date']}"
-            if tmdb_info.get("rating"):
-                info_text += f" · ⭐️ {tmdb_info['rating']:.1f}\n"
-            else:
-                info_text += "\n"
-            
-            # 简介长度限制
-            overview = tmdb_info.get('overview', '暂无简介')
-            if len(overview) > 200:
-                overview = overview[:200] + "…"
-            
-            info_text += f"\n{overview}\n\n"
-            info_text += "正在获取资源…"
-            
-            # 如果有海报图片，发送图片+文字
-            if tmdb_info.get("poster_url"):
-                try:
-                    await callback.message.answer_photo(
-                        photo=tmdb_info["poster_url"],
-                        caption=info_text,
-                        parse_mode="HTML"
-                    )
-                    await callback.message.delete()
-                except Exception as e:
-                    logging.warning(f"发送图片失败: {e}")
-                    await callback.message.edit_text(info_text, parse_mode="HTML")
-            else:
-                await callback.message.edit_text(info_text, parse_mode="HTML")
-        else:
-            # 如果获取TMDB信息失败，继续显示加载状态
-            await callback.message.edit_text("⏳ 正在获取资源...", parse_mode="HTML")
-        
-        # 获取资源列表
-        resources = await get_resources_by_tmdb_id(int(tmdb_id), media_type)
-        
-        if not resources:
-            # 如果有TMDB信息，在新消息中显示未找到资源
-            if tmdb_info:
-                await callback.message.answer("❌ 未找到资源", parse_mode="HTML")
-            else:
-                await callback.message.edit_text("❌ 未找到资源", parse_mode="HTML")
-            return
-
-        for res in resources:
-            rid = str(res.get("id") or "")
-            website = str(res.get("website") or "")
-            if rid and website:
-                resource_website_cache[rid] = website
-        
-        text, kb = format_resource_list(resources, media_type, provider_filter="115")
-
-        # 如果已经发送了TMDB信息，在新消息中显示资源列表
-        if tmdb_info and tmdb_info.get("poster_url"):
-            sent_msg = await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
-            state_key = make_message_state_key(sent_msg)
-            if state_key:
-                resource_list_state[state_key] = {
-                    "resources": resources,
-                    "media_type": media_type,
-                    "title": None,
-                }
-                trim_dict_cache(resource_list_state, RESOURCE_LIST_STATE_LIMIT)
-        else:
-            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-            state_key = make_message_state_key(callback.message)
-            if state_key:
-                resource_list_state[state_key] = {
-                    "resources": resources,
-                    "media_type": media_type,
-                    "title": None,
-                }
-                trim_dict_cache(resource_list_state, RESOURCE_LIST_STATE_LIMIT)
-        
-    except Exception as e:
-        logging.error(f"❌ 处理TMDB选择失败: {e}")
-        await callback.message.edit_text(f"❌ 处理失败: {e}", parse_mode="HTML")
+    await hdhive_openapi_flow_service.handle_select_tmdb_callback(callback)

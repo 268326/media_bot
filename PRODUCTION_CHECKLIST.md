@@ -7,6 +7,7 @@
 - [ ] 已复制 `.env.example` 为 `.env`
 - [ ] 已填 `BOT_TOKEN`
 - [ ] 已填 `HDHIVE_API_KEY`
+- [ ] 如使用 OpenAPI 应用而非个人 API Key，已按官方文档配置 `HDHIVE_ACCESS_TOKEN`（Bearer 用户令牌）
 - [ ] 已填 `bot_user_id`
 - [ ] 已填 `bot_chat_id`
 - [ ] 如需关键词搜索，已填 `TMDB_API_KEY`

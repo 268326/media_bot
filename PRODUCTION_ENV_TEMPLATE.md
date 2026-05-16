@@ -11,8 +11,9 @@ BOT_TOKEN=替换成你的 Telegram Bot Token
 
 # HDHive Open API
 HDHIVE_API_KEY=替换成你的 HDHive Open API Key
-HDHIVE_BASE_URL=https://hdhive.com
-HDHIVE_OPEN_API_BASE_URL=https://hdhive.com/api/open
+# 地址固定使用官方 SDK 文档中的 https://hdhive.com，无需也不支持通过环境变量配置
+# 可选但生产推荐：官方用户授权 Token，用于 Authorization: Bearer <token>
+HDHIVE_ACCESS_TOKEN=
 
 # 生产强烈建议配置：限制谁能使用机器人
 # 多个用户用英文逗号分隔
@@ -35,9 +36,6 @@ HDHIVE_PARSE_INCOMING_LINKS=1
 # 自动解锁阈值
 # 0 = 关闭自动解锁（生产更稳妥）
 AUTO_UNLOCK_THRESHOLD=0
-
-# HDHive 解锁限速
-HDHIVE_UNLOCK_RATE_LIMIT_PER_MINUTE=3
 
 # 自动签到
 CHECKIN_CRON=
@@ -163,12 +161,12 @@ STRM_PRUNE_HTTP_BACKOFF=2.0
 ```env
 BOT_TOKEN=替换
 HDHIVE_API_KEY=替换
+HDHIVE_ACCESS_TOKEN=
 bot_user_id=123456789
 bot_chat_id=123456789
 TMDB_API_KEY=
 HDHIVE_PARSE_INCOMING_LINKS=1
 AUTO_UNLOCK_THRESHOLD=0
-HDHIVE_UNLOCK_RATE_LIMIT_PER_MINUTE=3
 CHECKIN_CRON=
 CHECKIN_TIMEZONE=Asia/Shanghai
 CHECKIN_GAMBLE=0
